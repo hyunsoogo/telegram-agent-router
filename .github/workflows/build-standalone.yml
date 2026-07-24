@@ -1,0 +1,36 @@
+name: build-standalone
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: telegram-agent-router-windows-x64.exe
+          - os: ubuntu-latest
+            artifact: telegram-agent-router-linux-x64
+          - os: macos-14
+            artifact: telegram-agent-router-macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun x tsc --noEmit
+      - shell: bash
+        run: mkdir -p release && bun build --compile src/index.ts --outfile="release/${{ matrix.artifact }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: release/${{ matrix.artifact }}
+          if-no-files-found: error

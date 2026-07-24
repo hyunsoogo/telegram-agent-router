@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import { runMcpBridge, type BridgeOptions } from './bridge.js'
 import { configureState, loadBotToken, loadConfig, statePaths } from './paths.js'
 import { runDaemon } from './router.js'
+import { installClients, type InstallTarget } from './installer.js'
 import { RouterStore } from './store.js'
 import type { ClientKind } from './protocol.js'
 
@@ -17,6 +18,7 @@ Usage:
   telegram-agent-router configure [--token <token>] [--port <port>]
   telegram-agent-router daemon
   telegram-agent-router mcp --client <codex|claude> --session <id> [--label <label>]
+  telegram-agent-router install --client <codex|claude|both> --session <id> [--dry-run]
   telegram-agent-router access pair <code> [--session <id|*>]
   telegram-agent-router access allow <user-id> [--session <id|*>]
   telegram-agent-router access grant <user-id> <session-id>
@@ -106,9 +108,13 @@ async function doctor(): Promise<void> {
   } catch (error) {
     checks.push(['sqlite', false, String(error)])
   }
+  checks.push(['Claude Code CLI', Boolean(Bun.which('claude')), Bun.which('claude') ?? 'not found'])
+  checks.push(['Codex CLI', Boolean(Bun.which('codex')), Bun.which('codex') ?? 'not found'])
   if (config) {
     try {
-      const response = await fetch(`http://${config.host}:${config.port}/health`, { signal: AbortSignal.timeout(1500) })
+      const health = new URL(`http://${config.host}:${config.port}/health`)
+      health.searchParams.set('secret', config.secret)
+      const response = await fetch(health, { signal: AbortSignal.timeout(1500) })
       checks.push(['daemon', response.ok, response.ok ? `${config.host}:${config.port}` : `HTTP ${response.status}`])
     } catch (error) {
       checks.push(['daemon', false, String(error)])
@@ -151,6 +157,20 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       workspace: resolve(option(args, '--workspace') ?? process.cwd()),
     }
     await runMcpBridge(options)
+    return
+  }
+  if (command === 'install') {
+    const target = requireOption(args, '--client') as InstallTarget
+    if (!['claude', 'codex', 'both'].includes(target)) throw new Error('invalid install client; expected claude, codex, or both')
+    const sessionId = requireOption(args, '--session')
+    await installClients({
+      target,
+      sessionId,
+      label: option(args, '--label') ?? sessionId,
+      workspace: resolve(option(args, '--workspace') ?? process.cwd()),
+      binaryPath: option(args, '--binary'),
+      claudeScope: (option(args, '--scope') ?? 'user') as 'local' | 'user' | 'project',
+    }, args.includes('--dry-run'))
     return
   }
   if (command === 'access') {

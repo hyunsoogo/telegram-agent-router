@@ -46,8 +46,13 @@ export type RouterToBridge =
 export function parseBridgeMessage(raw: string): BridgeToRouter {
   const value = JSON.parse(raw) as Partial<BridgeToRouter>
   if (value.type === 'heartbeat') return { type: 'heartbeat' }
-  if (value.type === 'register' && value.session && typeof value.session.id === 'string') {
-    return value as BridgeToRouter
+  if (value.type === 'register' && value.session) {
+    const session = value.session as Partial<SessionDescriptor>
+    const validId = typeof session.id === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(session.id)
+    const validClient = session.client === 'claude' || session.client === 'codex' || session.client === 'other'
+    if (validId && validClient && typeof session.label === 'string' && typeof session.workspace === 'string' && typeof session.startedAt === 'string') {
+      return value as BridgeToRouter
+    }
   }
   if (value.type === 'action' && typeof value.requestId === 'string' && value.action) {
     return value as BridgeToRouter

@@ -4,6 +4,7 @@ import type { ServerWebSocket } from 'bun'
 import { loadBotToken, loadConfig, statePaths } from './paths.js'
 import { parseBridgeMessage, type InboundEvent, type RouterAction, type RouterToBridge, type SessionDescriptor } from './protocol.js'
 import { SessionRegistry } from './session-registry.js'
+import { acquireDaemonLock } from './lock.js'
 import { RouterStore } from './store.js'
 
 type SocketData = {
@@ -67,13 +68,13 @@ async function requireAllowed(ctx: Context, store: RouterStore): Promise<{ userI
   return null
 }
 
-export async function runDaemon(): Promise<void> {
-  const paths = statePaths()
+async function runOwnedDaemon(paths: ReturnType<typeof statePaths>): Promise<void> {
   const config = loadConfig(paths)
   const token = loadBotToken(paths)
   const store = new RouterStore(paths.database)
   const registry = new SessionRegistry<BridgeSocket>()
   const bot = new Bot(token)
+  await bot.init()
 
   const server = Bun.serve<SocketData>({
     hostname: config.host,
@@ -242,4 +243,13 @@ export async function runDaemon(): Promise<void> {
 
   process.stderr.write(`telegram-agent-router: local bridge ws://${config.host}:${config.port}/bridge\n`)
   await bot.start({ onStart: info => { process.stderr.write(`telegram-agent-router: polling as @${info.username}\n`) } })
+}
+export async function runDaemon(): Promise<void> {
+  const paths = statePaths()
+  const release = acquireDaemonLock(paths.pid)
+  try {
+    await runOwnedDaemon(paths)
+  } finally {
+    release()
+  }
 }

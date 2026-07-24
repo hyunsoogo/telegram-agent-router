@@ -14,6 +14,7 @@ export type StatePaths = {
   config: string
   env: string
   database: string
+  pid: string
 }
 
 export function statePaths(): StatePaths {
@@ -23,6 +24,7 @@ export function statePaths(): StatePaths {
     config: join(home, 'config.json'),
     env: join(home, '.env'),
     database: join(home, 'router.db'),
+    pid: join(home, 'daemon.pid'),
   }
 }
 

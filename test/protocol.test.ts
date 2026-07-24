@@ -12,8 +12,12 @@ describe('bridge protocol validation', () => {
     })).type).toBe('action')
   })
 
-  test('rejects malformed messages', () => {
+  test('rejects malformed messages and unsafe session IDs', () => {
     expect(() => parseBridgeMessage('{"type":"register"}')).toThrow('invalid bridge message')
     expect(() => parseBridgeMessage('{"type":"unknown"}')).toThrow('invalid bridge message')
+    expect(() => parseBridgeMessage(JSON.stringify({
+      type: 'register',
+      session: { id: '../bad', client: 'codex', label: 'bad', workspace: '/', startedAt: 'now' },
+    }))).toThrow('invalid bridge message')
   })
 })
