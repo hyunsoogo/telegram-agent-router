@@ -1,0 +1,27 @@
+{
+  "name": "telegram-agent-router",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "telegram-agent-router": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "test": "bun test",
+    "check": "bun build src/index.ts --target=bun --outdir=dist/check",
+    "build": "bun build --compile src/index.ts --outfile=dist/telegram-agent-router",
+    "build:windows": "bun build --compile --target=bun-windows-x64-baseline src/index.ts --outfile=release/telegram-agent-router-windows-x64",
+    "build:linux": "bun build --compile --target=bun-linux-x64-baseline src/index.ts --outfile=release/telegram-agent-router-linux-x64",
+    "build:macos": "bun build --compile --target=bun-darwin-arm64 src/index.ts --outfile=release/telegram-agent-router-macos-arm64"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.5",
+    "grammy": "^1.38.2",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.19",
+    "typescript": "^5.9.2"
+  }
+}
