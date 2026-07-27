@@ -17,9 +17,12 @@ The daemon binds to `127.0.0.1` by default. Bridge and health endpoints require 
 
 `daemon.pid` is acquired without replacing a live process. This prevents a second CLI or reviewer process from taking Telegram polling ownership.
 
-### Primary and standby sessions
+### Primary and standby Claude sessions
 
-The first bridge registered for a session ID is primary. Later bridges with the same ID are standby and receive no inbound messages. When the primary disconnects, the oldest standby is promoted.
+The first Claude MCP bridge registered for a session ID is primary. Later
+bridges with the same ID are standby and receive no inbound messages. When the
+primary disconnects, the oldest standby is promoted. Codex sessions instead map
+directly to App Server threads.
 
 ### Terminal-side pairing
 
@@ -33,10 +36,20 @@ Messages go to one selected session, never broadcast. Session grants are checked
 
 The database stores identities, grants, routes, pairing state, and metadata-only audit events. Message bodies are not persisted by default.
 
+### Background process privacy
+
+Windows automatic-start entries launch each daemon in a hidden process. The
+managed Codex App Server does not inherit stdout or stderr, preventing
+conversation and tool streams from appearing in an automatic-start console.
+Operational router errors and session metadata can still appear when the router
+is deliberately run in the foreground.
+
 ## Known MVP limitations
 
 - Local users who can read the state directory can impersonate a bridge.
 - The bot token is stored in a local `.env` file, not an OS keychain.
 - Executables are not yet code-signed.
 - Attachments are not yet implemented.
-- Automatic Windows service, launchd, and systemd installation is not yet implemented.
+- Automatic start is supported through per-user Windows Run entries, macOS
+  LaunchAgents, and Linux `systemd --user` services. These are user-level
+  mechanisms rather than privileged system services.
