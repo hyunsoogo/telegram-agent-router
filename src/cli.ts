@@ -12,7 +12,7 @@ import {
   type RouterProfile,
 } from './paths.js'
 import { runDaemon } from './router.js'
-import { installClients, type InstallTarget } from './installer.js'
+import { installClients, resolveCodexBinaryPath, type InstallTarget } from './installer.js'
 import { RouterStore } from './store.js'
 import { readSecret } from './secret-prompt.js'
 import { VERSION } from './version.js'
@@ -213,10 +213,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     const includesCodex = target === 'codex' || target === 'both'
     let configuredCodexBinary: string | undefined
     try { configuredCodexBinary = loadConfig(statePaths('codex')).codexBinary } catch {}
-    const codexBinary = option(args, '--codex-binary')
+    const codexBinary = resolveCodexBinaryPath(option(args, '--codex-binary')
       ?? configuredCodexBinary
       ?? Bun.which('codex')
-      ?? undefined
+      ?? undefined)
     const dryRun = args.includes('--dry-run')
     const claudeToken = option(args, '--claude-token') ?? process.env.TELEGRAM_BOT_TOKEN_CLAUDE
     const codexToken = option(args, '--codex-token') ?? process.env.TELEGRAM_BOT_TOKEN_CODEX

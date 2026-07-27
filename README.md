@@ -133,6 +133,10 @@ Pull and rebuild for the current platform, then run the same compiled
 route history are preserved; the versioned executable, wrappers, MCP
 registration, and automatic-start entries are replaced.
 
+The installer resolves a `codex` symlink to its real executable before replacing
+the link with the managed wrapper. It refuses to overwrite an unrecognized
+regular file at the wrapper path.
+
 ## Automatic start
 
 - Windows: per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`

@@ -1,4 +1,16 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+  type Stats,
+} from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { installAutostart } from './autostart.js'
@@ -20,6 +32,9 @@ export type InstallCommand = {
   client: 'claude'
   argv: string[]
 }
+
+const CODEX_WRAPPER_MARKER = 'telegram-agent-router managed Codex wrapper'
+const MAX_WRAPPER_BYTES = 16 * 1024
 
 export function resolveBinaryPath(explicit?: string): string {
   if (explicit) return resolve(explicit)
@@ -58,9 +73,46 @@ export function codexWrapperContent(
   platform: NodeJS.Platform = process.platform,
 ): string {
   if (platform === 'win32') {
-    return `@echo off\r\n"${binaryPath.replaceAll('"', '""')}" launch codex -- %*\r\n`
+    return `@echo off\r\nrem ${CODEX_WRAPPER_MARKER}\r\n"${binaryPath.replaceAll('"', '""')}" launch codex -- %*\r\n`
   }
-  return `#!/bin/sh\nexec ${shellQuote(binaryPath)} launch codex -- "$@"\n`
+  return `#!/bin/sh\n# ${CODEX_WRAPPER_MARKER}\nexec ${shellQuote(binaryPath)} launch codex -- "$@"\n`
+}
+
+function lstatIfPresent(path: string): Stats | undefined {
+  try {
+    return lstatSync(path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
+  }
+}
+
+function isManagedCodexWrapper(path: string, stats: Stats, platform: NodeJS.Platform): boolean {
+  if (!stats.isFile() || stats.size > MAX_WRAPPER_BYTES) return false
+  const content = readFileSync(path, 'utf8')
+  if (content.includes(CODEX_WRAPPER_MARKER)) return true
+  return platform === 'win32'
+    ? content.includes(' launch codex -- %*')
+    : content.includes(' launch codex -- "$@"')
+}
+
+export function resolveCodexBinaryPath(
+  candidate: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (!candidate) return undefined
+  const absolute = resolve(candidate)
+  let canonical: string
+  try {
+    canonical = realpathSync(absolute)
+  } catch {
+    throw new Error(`Codex binary does not resolve to an existing file: ${absolute}`)
+  }
+  const stats = lstatSync(canonical)
+  if (isManagedCodexWrapper(canonical, stats, platform)) {
+    throw new Error(`Codex binary resolves to the managed router wrapper: ${canonical}; pass --codex-binary with the real Codex executable`)
+  }
+  return canonical
 }
 
 function profilePath(platform: NodeJS.Platform): string {
@@ -158,15 +210,44 @@ export async function installCodexWrapper(
   dryRun: boolean,
   platform: NodeJS.Platform = process.platform,
   managePath = true,
+  homeDirectory = homedir(),
 ): Promise<string> {
-  const directory = join(homedir(), '.local', 'bin')
+  const directory = join(homeDirectory, '.local', 'bin')
   const path = join(directory, platform === 'win32' ? 'codex.cmd' : 'codex')
   process.stdout.write(`write ${path}\n`)
   if (!dryRun) {
     mkdirSync(directory, { recursive: true })
-    await Bun.write(path, codexWrapperContent(binaryPath, platform))
+    const existing = lstatIfPresent(path)
+    if (existing && !existing.isSymbolicLink() && !isManagedCodexWrapper(path, existing, platform)) {
+      throw new Error(`refusing to overwrite existing Codex executable: ${path}; pass --codex-binary with the real executable and move it outside the wrapper path`)
+    }
+    const suffix = `${process.pid}-${Date.now()}`
+    const replacement = `${path}.new-${suffix}`
+    const previous = `${path}.previous-${suffix}`
+    await Bun.write(replacement, codexWrapperContent(binaryPath, platform))
     if (platform !== 'win32') {
-      try { chmodSync(path, 0o755) } catch {}
+      try { chmodSync(replacement, 0o755) } catch {}
+    }
+    let previousMoved = false
+    try {
+      if (existing) {
+        renameSync(path, previous)
+        previousMoved = true
+      }
+      renameSync(replacement, path)
+      if (previousMoved) {
+        try { unlinkSync(previous) } catch {}
+      }
+    } catch (error) {
+      try {
+        if (previousMoved && !lstatIfPresent(path) && lstatIfPresent(previous)) {
+          renameSync(previous, path)
+        }
+      } catch {}
+      try {
+        if (lstatIfPresent(replacement)) unlinkSync(replacement)
+      } catch {}
+      throw error
     }
   }
   if (managePath) {
