@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 const temporaryDirectories: string[] = []
+const symlinkTest = process.platform === 'win32' ? test.skip : test
 
 afterEach(() => {
   for (const path of temporaryDirectories.splice(0)) {
@@ -60,7 +61,7 @@ describe('standalone client installer', () => {
     )
   })
 
-  test('resolves a Claude symlink to its real executable', () => {
+  symlinkTest('resolves a Claude symlink to its real executable', () => {
     const home = temporaryHome()
     const binary = join(home, 'claude-real')
     const link = join(home, 'claude')
@@ -70,7 +71,7 @@ describe('standalone client installer', () => {
     expect(resolveClaudeBinaryPath(link, 'linux')).toBe(realpathSync(binary))
   })
 
-  test('resolves a Codex symlink to its real executable', () => {
+  symlinkTest('resolves a Codex symlink to its real executable', () => {
     const home = temporaryHome()
     const binary = join(home, 'codex-real')
     const link = join(home, 'codex')
@@ -80,7 +81,7 @@ describe('standalone client installer', () => {
     expect(resolveCodexBinaryPath(link, 'linux')).toBe(realpathSync(binary))
   })
 
-  test('replaces a Codex symlink without modifying its target', async () => {
+  symlinkTest('replaces a Codex symlink without modifying its target', async () => {
     const home = temporaryHome()
     const directory = join(home, '.local', 'bin')
     const binary = join(home, 'codex-real')
@@ -97,7 +98,7 @@ describe('standalone client installer', () => {
     expect(readFileSync(binary, 'utf8')).toBe('original codex binary')
   })
 
-  test('replaces a Claude symlink with a channel-enabled wrapper', async () => {
+  symlinkTest('replaces a Claude symlink with a channel-enabled wrapper', async () => {
     const home = temporaryHome()
     const directory = join(home, '.local', 'bin')
     const binary = join(home, 'claude-real')

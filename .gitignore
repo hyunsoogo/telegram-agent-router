@@ -8,3 +8,4 @@ coverage/
 *.db-wal
 .DS_Store
 Thumbs.db
+.gstack/

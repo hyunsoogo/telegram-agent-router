@@ -45,6 +45,58 @@ export type CodexOutput = {
   replyTo?: string
 }
 
+export const CODEX_APP_SERVER_STDIO = {
+  stdin: 'ignore',
+  stdout: 'ignore',
+  stderr: 'ignore',
+} as const
+
+type CodexAppServerProcess = ReturnType<typeof Bun.spawn>
+type CodexAppServerSpawner = (
+  argv: string[],
+  options: typeof CODEX_APP_SERVER_STDIO,
+) => CodexAppServerProcess
+
+export function spawnCodexAppServer(
+  binary: string,
+  url: string,
+  spawn: CodexAppServerSpawner = Bun.spawn,
+): CodexAppServerProcess {
+  return spawn([binary, 'app-server', '--listen', url], CODEX_APP_SERVER_STDIO)
+}
+
+function channelAttribute(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+}
+
+function channelBody(value: string): string {
+  return value.replace(/<(\/?channel)(?=[\s>])/gi, '&lt;$1')
+}
+
+export function codexTelegramInputText(event: InboundEvent): string {
+  const attributes: Array<[string, string | undefined]> = [
+    ['source', 'telegram'],
+    ['chat_id', event.meta.chat_id],
+    ['message_id', event.meta.message_id],
+    ['user', event.meta.user],
+    ['user_id', event.meta.user_id],
+    ['ts', event.meta.ts],
+    ['attachment_file_id', event.meta.attachment_file_id],
+    ['attachment_kind', event.meta.attachment_kind],
+    ['attachment_name', event.meta.attachment_name],
+    ['attachment_mime', event.meta.attachment_mime],
+  ]
+  const rendered = attributes
+    .filter((attribute): attribute is [string, string] => attribute[1] !== undefined)
+    .map(([name, value]) => `${name}="${channelAttribute(value)}"`)
+    .join(' ')
+  return `<channel ${rendered}>\n${channelBody(event.content)}\n</channel>`
+}
+
 export class CodexAppServer {
   private socket: WebSocket | null = null
   private process: ReturnType<typeof Bun.spawn> | null = null
@@ -116,7 +168,7 @@ export class CodexAppServer {
   private async deliverNow(sessionId: string, event: InboundEvent): Promise<void> {
     const thread = this.threads.get(sessionId)
     if (!thread) throw new Error('Codex session is no longer loaded')
-    const input = [{ type: 'text', text: event.content }]
+    const input = [{ type: 'text', text: codexTelegramInputText(event) }]
     let turnId = this.activeTurns.get(sessionId)
 
     if (!turnId && thread.status.type === 'active') {
@@ -174,11 +226,7 @@ export class CodexAppServer {
     if (!this.process || this.process.exitCode !== null) {
       const binary = this.config.codexBinary ?? Bun.which('codex')
       if (!binary) throw new Error('Codex CLI not found; configure the codex profile with --codex-binary')
-      this.process = Bun.spawn([binary, 'app-server', '--listen', url], {
-        stdin: 'ignore',
-        stdout: 'inherit',
-        stderr: 'inherit',
-      })
+      this.process = spawnCodexAppServer(binary, url)
       void this.process.exited.then(code => {
         if (!this.stopped) process.stderr.write(`telegram-agent-router[codex]: App Server exited with code ${code}\n`)
       })
