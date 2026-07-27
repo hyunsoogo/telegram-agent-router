@@ -59,6 +59,21 @@ export class SessionRegistry<T extends SessionSocket> {
       .sort((a, b) => a.label.localeCompare(b.label))
   }
 
+  update(socket: T, patch: Partial<Pick<SessionDescriptor, 'label' | 'summary' | 'branch'>>): SessionDescriptor | undefined {
+    for (const entry of this.primary.values()) {
+      if (entry.socket !== socket) continue
+      entry.session = { ...entry.session, ...patch }
+      return entry.session
+    }
+    for (const entries of this.standby.values()) {
+      const entry = entries.find(candidate => candidate.socket === socket)
+      if (!entry) continue
+      entry.session = { ...entry.session, ...patch }
+      return entry.session
+    }
+    return undefined
+  }
+
   role(socket: T): 'primary' | 'standby' | null {
     for (const entry of this.primary.values()) if (entry.socket === socket) return 'primary'
     for (const entries of this.standby.values()) {

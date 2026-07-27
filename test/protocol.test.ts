@@ -10,6 +10,12 @@ describe('bridge protocol validation', () => {
     expect(parseBridgeMessage(JSON.stringify({
       type: 'action', requestId: 'r1', action: { kind: 'reply', chat_id: '1', text: 'ok' },
     })).type).toBe('action')
+    expect(parseBridgeMessage(JSON.stringify({
+      type: 'inbound_result', deliveryId: 'd1', ok: true,
+    })).type).toBe('inbound_result')
+    expect(parseBridgeMessage(JSON.stringify({
+      type: 'update_session', patch: { summary: 'Reviewing Q2 report' },
+    })).type).toBe('update_session')
   })
 
   test('rejects malformed messages and unsafe session IDs', () => {
@@ -18,6 +24,12 @@ describe('bridge protocol validation', () => {
     expect(() => parseBridgeMessage(JSON.stringify({
       type: 'register',
       session: { id: '../bad', client: 'codex', label: 'bad', workspace: '/', startedAt: 'now' },
+    }))).toThrow('invalid bridge message')
+    expect(() => parseBridgeMessage(JSON.stringify({
+      type: 'update_session', patch: { summary: 'x'.repeat(161) },
+    }))).toThrow('invalid bridge message')
+    expect(() => parseBridgeMessage(JSON.stringify({
+      type: 'action', requestId: 'r1', action: { kind: 'reply', chat_id: '1' },
     }))).toThrow('invalid bridge message')
   })
 })

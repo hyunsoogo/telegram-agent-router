@@ -4,12 +4,19 @@ import { join, resolve } from 'node:path'
 import { randomBytes } from 'node:crypto'
 
 export type RouterConfig = {
+  profile: RouterProfile
   host: string
   port: number
   secret: string
+  appServerPort?: number
+  codexBinary?: string
 }
 
+export type RouterProfile = 'claude' | 'codex'
+
 export type StatePaths = {
+  profile: RouterProfile
+  root: string
   home: string
   config: string
   env: string
@@ -17,13 +24,27 @@ export type StatePaths = {
   pid: string
 }
 
-export function statePaths(): StatePaths {
-  const home = resolve(process.env.TELEGRAM_AGENT_ROUTER_HOME ?? join(homedir(), '.telegram-agent-router'))
+export const DEFAULT_PORTS: Record<RouterProfile, number> = {
+  claude: 47321,
+  codex: 47322,
+}
+
+export function asProfile(value: string | undefined, fallback: RouterProfile = 'codex'): RouterProfile {
+  const profile = value ?? fallback
+  if (profile === 'claude' || profile === 'codex') return profile
+  throw new Error(`invalid profile '${profile}'; expected claude or codex`)
+}
+
+export function statePaths(profile: RouterProfile = 'codex'): StatePaths {
+  const root = resolve(process.env.TELEGRAM_AGENT_ROUTER_HOME ?? join(homedir(), '.telegram-agent-router'))
+  const home = join(root, profile)
   return {
+    profile,
+    root,
     home,
     config: join(home, 'config.json'),
     env: join(home, '.env'),
-    database: join(home, 'router.db'),
+    database: join(home, 'router.sqlite'),
     pid: join(home, 'daemon.pid'),
   }
 }
@@ -38,11 +59,19 @@ export function loadConfig(paths = statePaths()): RouterConfig {
   if (!parsed.secret || !parsed.host || !Number.isInteger(parsed.port)) {
     throw new Error(`invalid router config: ${paths.config}`)
   }
-  return parsed as RouterConfig
+  return {
+    profile: parsed.profile ?? paths.profile,
+    host: parsed.host,
+    port: parsed.port!,
+    secret: parsed.secret,
+    ...(Number.isInteger(parsed.appServerPort) ? { appServerPort: parsed.appServerPort } : {}),
+    ...(parsed.codexBinary ? { codexBinary: parsed.codexBinary } : {}),
+  }
 }
 
 export function loadBotToken(paths = statePaths()): string {
-  if (process.env.TELEGRAM_BOT_TOKEN) return process.env.TELEGRAM_BOT_TOKEN
+  const profileToken = process.env[`TELEGRAM_BOT_TOKEN_${paths.profile.toUpperCase()}`]
+  if (profileToken) return profileToken
   if (!existsSync(paths.env)) throw new Error(`Telegram token missing. Run configure first.`)
   for (const line of readFileSync(paths.env, 'utf8').split(/\r?\n/)) {
     const match = line.match(/^TELEGRAM_BOT_TOKEN=(.+)$/)
@@ -51,20 +80,38 @@ export function loadBotToken(paths = statePaths()): string {
   throw new Error(`TELEGRAM_BOT_TOKEN missing in ${paths.env}`)
 }
 
-export function configureState(options: { token?: string; host?: string; port?: number }): StatePaths {
-  const paths = ensureStateDir()
+export function configureState(options: {
+  profile?: RouterProfile
+  token?: string
+  host?: string
+  port?: number
+  appServerPort?: number
+  codexBinary?: string
+}): StatePaths {
+  const paths = ensureStateDir(statePaths(options.profile))
   const existing = existsSync(paths.config)
     ? (JSON.parse(readFileSync(paths.config, 'utf8')) as Partial<RouterConfig>)
     : {}
   const config: RouterConfig = {
+    profile: paths.profile,
     host: options.host ?? existing.host ?? '127.0.0.1',
-    port: options.port ?? existing.port ?? 47321,
+    port: options.port ?? existing.port ?? DEFAULT_PORTS[paths.profile],
     secret: existing.secret ?? randomBytes(32).toString('base64url'),
+    ...(paths.profile === 'codex'
+      ? {
+          appServerPort: options.appServerPort ?? existing.appServerPort ?? 47323,
+          ...(options.codexBinary ?? existing.codexBinary
+            ? { codexBinary: resolve(options.codexBinary ?? existing.codexBinary!) }
+            : {}),
+        }
+      : {}),
   }
   writeFileSync(paths.config, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
   try { chmodSync(paths.config, 0o600) } catch {}
 
-  const token = options.token ?? process.env.TELEGRAM_BOT_TOKEN
+  const token = options.token
+    ?? process.env[`TELEGRAM_BOT_TOKEN_${paths.profile.toUpperCase()}`]
+    ?? process.env.TELEGRAM_BOT_TOKEN
   if (token) {
     writeFileSync(paths.env, `TELEGRAM_BOT_TOKEN=${token.trim()}\n`, { mode: 0o600 })
     try { chmodSync(paths.env, 0o600) } catch {}

@@ -1,6 +1,6 @@
 {
   "name": "telegram-agent-router",
-  "version": "0.1.0",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "bin": {
@@ -12,8 +12,13 @@
     "check": "bun build src/index.ts --target=bun --outdir=dist/check",
     "build": "bun build --compile src/index.ts --outfile=dist/telegram-agent-router",
     "build:windows": "bun build --compile --target=bun-windows-x64-baseline src/index.ts --outfile=release/telegram-agent-router-windows-x64",
-    "build:linux": "bun build --compile --target=bun-linux-x64-baseline src/index.ts --outfile=release/telegram-agent-router-linux-x64",
-    "build:macos": "bun build --compile --target=bun-darwin-arm64 src/index.ts --outfile=release/telegram-agent-router-macos-arm64"
+    "build:linux": "bun run build:linux:x64 && bun run build:linux:arm64",
+    "build:linux:x64": "bun build --compile --target=bun-linux-x64-baseline src/index.ts --outfile=release/telegram-agent-router-linux-x64",
+    "build:linux:arm64": "bun build --compile --target=bun-linux-arm64 src/index.ts --outfile=release/telegram-agent-router-linux-arm64",
+    "build:macos": "bun run build:macos:arm64 && bun run build:macos:x64",
+    "build:macos:arm64": "bun build --compile --target=bun-darwin-arm64 src/index.ts --outfile=release/telegram-agent-router-macos-arm64",
+    "build:macos:x64": "bun build --compile --target=bun-darwin-x64 src/index.ts --outfile=release/telegram-agent-router-macos-x64",
+    "build:all": "bun run build:windows && bun run build:linux && bun run build:macos"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.5",

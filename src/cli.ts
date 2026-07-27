@@ -2,28 +2,41 @@ import { Bot } from 'grammy'
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { runMcpBridge, type BridgeOptions } from './bridge.js'
-import { configureState, loadBotToken, loadConfig, statePaths } from './paths.js'
+import { launchCodex } from './codex-launcher.js'
+import {
+  asProfile,
+  configureState,
+  loadBotToken,
+  loadConfig,
+  statePaths,
+  type RouterProfile,
+} from './paths.js'
 import { runDaemon } from './router.js'
 import { installClients, type InstallTarget } from './installer.js'
 import { RouterStore } from './store.js'
-import type { ClientKind } from './protocol.js'
+import { readSecret } from './secret-prompt.js'
+import { VERSION } from './version.js'
 
-export const VERSION = '0.1.0'
+export { VERSION }
 
 export const HELP = `telegram-agent-router ${VERSION}
 
-Standalone Telegram router and MCP bridge for Claude Code and Codex CLI.
+Telegram routing for multiple Claude Code and Codex CLI sessions.
 
 Usage:
-  telegram-agent-router configure [--token <token>] [--port <port>]
-  telegram-agent-router daemon
-  telegram-agent-router mcp --client <codex|claude> --session <id> [--label <label>]
-  telegram-agent-router install --client <codex|claude|both> --session <id> [--dry-run]
-  telegram-agent-router access pair <code> [--session <id|*>]
-  telegram-agent-router access allow <user-id> [--session <id|*>]
-  telegram-agent-router access grant <user-id> <session-id>
-  telegram-agent-router access list
-  telegram-agent-router doctor
+  telegram-agent-router configure --profile <claude|codex> --token <token> [--port <port>]
+  telegram-agent-router install [--client <claude|codex|both>] [--no-autostart] [--dry-run]
+  telegram-agent-router daemon --profile <claude|codex>
+  telegram-agent-router mcp --profile claude
+  telegram-agent-router launch codex -- [codex arguments]
+  telegram-agent-router access pair <code> --profile <claude|codex> [--session <id|*>]
+  telegram-agent-router access allow <user-id> --profile <claude|codex> [--session <id|*>]
+  telegram-agent-router access grant <user-id> <session-id> --profile <claude|codex>
+  telegram-agent-router access list --profile <claude|codex>
+  telegram-agent-router doctor [--profile <claude|codex|all>]
+
+Install securely prompts for missing Claude and Codex tokens.
+Automatic start is installed by default on Windows, macOS, and Linux.
 `
 
 function option(args: string[], name: string): string | undefined {
@@ -31,21 +44,22 @@ function option(args: string[], name: string): string | undefined {
   return index >= 0 ? args[index + 1] : undefined
 }
 
-function requireOption(args: string[], name: string): string {
-  const value = option(args, name)
-  if (!value) throw new Error(`missing required option ${name}`)
-  return value
+function asPort(value: string | undefined, name: string): number | undefined {
+  if (!value) return undefined
+  const port = Number.parseInt(value, 10)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`invalid ${name}: ${value}`)
+  return port
 }
 
-function asClient(value: string): ClientKind {
-  if (value === 'claude' || value === 'codex' || value === 'other') return value
-  throw new Error(`invalid client '${value}'; expected claude, codex, or other`)
+function selectedProfile(args: string[], fallback: RouterProfile = 'codex'): RouterProfile {
+  return asProfile(option(args, '--profile'), fallback)
 }
 
 async function accessCommand(args: string[]): Promise<void> {
-  const paths = statePaths()
-  if (!existsSync(paths.config)) throw new Error('router is not configured')
-  const store = new RouterStore(paths.database)
+  const profile = selectedProfile(args)
+  const paths = statePaths(profile)
+  if (!existsSync(paths.config)) throw new Error(`${profile} router is not configured`)
+  const store = new RouterStore(paths.database, profile)
   try {
     const subcommand = args[0]
     if (subcommand === 'pair') {
@@ -54,14 +68,14 @@ async function accessCommand(args: string[]): Promise<void> {
       const pairing = store.approvePairing(code, option(args, '--session') ?? '*')
       const bot = new Bot(loadBotToken(paths))
       await bot.api.sendMessage(pairing.chatId, 'Pairing approved. Use /sessions to choose a coding session.')
-      process.stdout.write(`Approved Telegram user ${pairing.userId}.\n`)
+      process.stdout.write(`Approved Telegram user ${pairing.userId} for ${profile}.\n`)
       return
     }
     if (subcommand === 'allow') {
       const userId = args[1]
       if (!userId) throw new Error('Telegram user ID required')
       store.allowUser(userId, null, option(args, '--session') ?? '*')
-      process.stdout.write(`Allowed Telegram user ${userId}.\n`)
+      process.stdout.write(`Allowed Telegram user ${userId} for ${profile}.\n`)
       return
     }
     if (subcommand === 'grant') {
@@ -69,7 +83,7 @@ async function accessCommand(args: string[]): Promise<void> {
       const sessionId = args[2]
       if (!userId || !sessionId) throw new Error('usage: access grant <user-id> <session-id>')
       store.grantSession(userId, sessionId)
-      process.stdout.write(`Granted ${userId} access to ${sessionId}.\n`)
+      process.stdout.write(`Granted ${userId} access to ${sessionId} on ${profile}.\n`)
       return
     }
     if (subcommand === 'list') {
@@ -85,43 +99,69 @@ async function accessCommand(args: string[]): Promise<void> {
   }
 }
 
-async function doctor(): Promise<void> {
-  const paths = statePaths()
+async function doctorProfile(profile: RouterProfile): Promise<Array<[string, boolean, string]>> {
+  const paths = statePaths(profile)
   const checks: Array<[string, boolean, string]> = []
   let config
   try {
     config = loadConfig(paths)
-    checks.push(['config', true, paths.config])
+    checks.push([`${profile} config`, true, paths.config])
   } catch (error) {
-    checks.push(['config', false, String(error)])
+    checks.push([`${profile} config`, false, String(error)])
   }
   try {
     loadBotToken(paths)
-    checks.push(['telegram token', true, paths.env])
+    checks.push([`${profile} Telegram token`, true, paths.env])
   } catch (error) {
-    checks.push(['telegram token', false, String(error)])
+    checks.push([`${profile} Telegram token`, false, String(error)])
   }
   try {
-    const store = new RouterStore(paths.database)
+    const store = new RouterStore(paths.database, profile)
     store.close()
-    checks.push(['sqlite', true, paths.database])
+    checks.push([`${profile} sqlite`, true, paths.database])
   } catch (error) {
-    checks.push(['sqlite', false, String(error)])
+    checks.push([`${profile} sqlite`, false, String(error)])
   }
-  checks.push(['Claude Code CLI', Boolean(Bun.which('claude')), Bun.which('claude') ?? 'not found'])
-  checks.push(['Codex CLI', Boolean(Bun.which('codex')), Bun.which('codex') ?? 'not found'])
   if (config) {
     try {
       const health = new URL(`http://${config.host}:${config.port}/health`)
       health.searchParams.set('secret', config.secret)
       const response = await fetch(health, { signal: AbortSignal.timeout(1500) })
-      checks.push(['daemon', response.ok, response.ok ? `${config.host}:${config.port}` : `HTTP ${response.status}`])
+      if (!response.ok) {
+        checks.push([`${profile} daemon`, false, `HTTP ${response.status}`])
+      } else {
+        const payload = await response.json() as { profile?: string; version?: string }
+        const healthy = payload.profile === profile && payload.version === VERSION
+        checks.push([
+          `${profile} daemon`,
+          healthy,
+          healthy
+            ? `${config.host}:${config.port} v${payload.version}`
+            : `${payload.profile ?? 'unknown'} ${payload.version ?? 'legacy'} on ${config.host}:${config.port}`,
+        ])
+      }
     } catch (error) {
-      checks.push(['daemon', false, String(error)])
+      checks.push([`${profile} daemon`, false, String(error)])
     }
   }
+  if (profile === 'claude') checks.push(['Claude Code CLI', Boolean(Bun.which('claude')), Bun.which('claude') ?? 'not found'])
+  if (profile === 'codex') checks.push(['Codex CLI', Boolean(config?.codexBinary ?? Bun.which('codex')), config?.codexBinary ?? Bun.which('codex') ?? 'not found'])
+  return checks
+}
+
+async function doctor(args: string[]): Promise<void> {
+  const value = option(args, '--profile') ?? 'all'
+  const profiles: RouterProfile[] = value === 'all' ? ['claude', 'codex'] : [asProfile(value)]
+  const checks = (await Promise.all(profiles.map(doctorProfile))).flat()
   for (const [name, ok, detail] of checks) process.stdout.write(`${ok ? 'OK' : 'FAIL'}  ${name}: ${detail}\n`)
   if (checks.some(([, ok]) => !ok)) process.exitCode = 1
+}
+
+function requireConfigured(profile: RouterProfile): void {
+  const paths = statePaths(profile)
+  if (!existsSync(paths.config) || !existsSync(paths.env)) {
+    throw new Error(`${profile} is not configured; run configure --profile ${profile} --token <token>`)
+  }
 }
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
@@ -135,42 +175,87 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     return
   }
   if (command === 'configure') {
-    const portText = option(args, '--port')
+    const profile = selectedProfile(args)
+    const environmentToken = process.env[`TELEGRAM_BOT_TOKEN_${profile.toUpperCase()}`]
+    const token = option(args, '--token')
+      ?? environmentToken
+      ?? await readSecret(`${profile} Telegram bot token: `)
     const paths = configureState({
-      token: option(args, '--token'),
+      profile,
+      token,
       host: option(args, '--host'),
-      ...(portText ? { port: Number.parseInt(portText, 10) } : {}),
+      port: asPort(option(args, '--port'), 'port'),
+      appServerPort: asPort(option(args, '--app-server-port'), 'App Server port'),
+      codexBinary: option(args, '--codex-binary'),
     })
-    process.stdout.write(`Configured router state in ${paths.home}.\n`)
+    process.stdout.write(`Configured ${profile} router state in ${paths.home}.\n`)
     return
   }
   if (command === 'daemon') {
-    await runDaemon()
+    await runDaemon(selectedProfile(args))
     return
   }
   if (command === 'mcp') {
-    const sessionId = requireOption(args, '--session')
     const options: BridgeOptions = {
-      client: asClient(requireOption(args, '--client')),
-      sessionId,
-      label: option(args, '--label') ?? sessionId,
+      profile: selectedProfile(args, 'claude'),
+      sessionId: option(args, '--session'),
+      label: option(args, '--label'),
       workspace: resolve(option(args, '--workspace') ?? process.cwd()),
+      summary: option(args, '--summary'),
     }
     await runMcpBridge(options)
     return
   }
   if (command === 'install') {
-    const target = requireOption(args, '--client') as InstallTarget
+    const target = (option(args, '--client') ?? 'both') as InstallTarget
     if (!['claude', 'codex', 'both'].includes(target)) throw new Error('invalid install client; expected claude, codex, or both')
-    const sessionId = requireOption(args, '--session')
+    const includesClaude = target === 'claude' || target === 'both'
+    const includesCodex = target === 'codex' || target === 'both'
+    let configuredCodexBinary: string | undefined
+    try { configuredCodexBinary = loadConfig(statePaths('codex')).codexBinary } catch {}
+    const codexBinary = option(args, '--codex-binary')
+      ?? configuredCodexBinary
+      ?? Bun.which('codex')
+      ?? undefined
+    const dryRun = args.includes('--dry-run')
+    const claudeToken = option(args, '--claude-token') ?? process.env.TELEGRAM_BOT_TOKEN_CLAUDE
+    const codexToken = option(args, '--codex-token') ?? process.env.TELEGRAM_BOT_TOKEN_CODEX
+    if (includesClaude && (claudeToken || (!dryRun && !existsSync(statePaths('claude').env)))) {
+      configureState({
+        profile: 'claude',
+        token: claudeToken ?? await readSecret('claude Telegram bot token: '),
+      })
+    }
+    if (includesCodex && (codexToken || (!dryRun && !existsSync(statePaths('codex').env)))) {
+      configureState({
+        profile: 'codex',
+        token: codexToken ?? await readSecret('codex Telegram bot token: '),
+        codexBinary,
+      })
+    } else if (includesCodex && existsSync(statePaths('codex').config) && codexBinary) {
+      configureState({ profile: 'codex', codexBinary })
+    }
+    if (!dryRun) {
+      if (includesClaude) requireConfigured('claude')
+      if (includesCodex) requireConfigured('codex')
+    }
     await installClients({
       target,
-      sessionId,
-      label: option(args, '--label') ?? sessionId,
-      workspace: resolve(option(args, '--workspace') ?? process.cwd()),
       binaryPath: option(args, '--binary'),
+      codexBinary,
       claudeScope: (option(args, '--scope') ?? 'user') as 'local' | 'user' | 'project',
-    }, args.includes('--dry-run'))
+      autostart: !args.includes('--no-autostart'),
+    }, dryRun)
+    return
+  }
+  if (command === 'launch' && args[1] === 'codex') {
+    const paths = statePaths('codex')
+    const config = loadConfig(paths)
+    const binary = config.codexBinary
+    if (!binary) throw new Error('real Codex binary is not configured; rerun install --client codex --codex-binary <path>')
+    const separator = args.indexOf('--')
+    const codexArgs = separator >= 0 ? args.slice(separator + 1) : args.slice(2)
+    process.exitCode = await launchCodex(binary, paths, config, codexArgs)
     return
   }
   if (command === 'access') {
@@ -178,7 +263,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     return
   }
   if (command === 'doctor') {
-    await doctor()
+    await doctor(args)
     return
   }
   process.stderr.write(`Unknown command: ${command}\n\n${HELP}`)

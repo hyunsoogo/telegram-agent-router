@@ -12,12 +12,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          - os: ubuntu-latest
             artifact: telegram-agent-router-windows-x64.exe
+            target: bun-windows-x64-baseline
           - os: ubuntu-latest
             artifact: telegram-agent-router-linux-x64
-          - os: macos-14
+            target: bun-linux-x64-baseline
+          - os: ubuntu-latest
+            artifact: telegram-agent-router-linux-arm64
+            target: bun-linux-arm64
+          - os: ubuntu-latest
             artifact: telegram-agent-router-macos-arm64
+            target: bun-darwin-arm64
+          - os: ubuntu-latest
+            artifact: telegram-agent-router-macos-x64
+            target: bun-darwin-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +37,7 @@ jobs:
       - run: bun test
       - run: bun x tsc --noEmit
       - shell: bash
-        run: mkdir -p release && bun build --compile src/index.ts --outfile="release/${{ matrix.artifact }}"
+        run: mkdir -p release && bun build --compile --target="${{ matrix.target }}" src/index.ts --outfile="release/${{ matrix.artifact }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}

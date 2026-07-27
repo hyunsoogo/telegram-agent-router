@@ -11,8 +11,10 @@ export type PendingPairing = {
 
 export class RouterStore {
   readonly db: Database
+  readonly profile: 'claude' | 'codex'
 
-  constructor(path: string) {
+  constructor(path: string, profile: 'claude' | 'codex' = 'codex') {
+    this.profile = profile
     this.db = new Database(path, { create: true, strict: true })
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;')
     this.db.exec(`
@@ -40,6 +42,14 @@ export class RouterStore {
         session_id TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS bot_messages (
+        chat_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, message_id)
+      );
+      CREATE INDEX IF NOT EXISTS bot_messages_created_at ON bot_messages(created_at);
       CREATE TABLE IF NOT EXISTS audit_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         created_at INTEGER NOT NULL,
@@ -141,6 +151,24 @@ export class RouterStore {
       ON CONFLICT(user_id) DO UPDATE SET session_id = excluded.session_id, updated_at = excluded.updated_at
     `).run(userId, sessionId, Date.now())
     this.audit('route_selected', userId, sessionId, null)
+  }
+
+  rememberBotMessage(chatId: string, messageId: string, sessionId: string): void {
+    const now = Date.now()
+    this.db.transaction(() => {
+      this.db.query(`
+        INSERT INTO bot_messages (chat_id, message_id, session_id, created_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(chat_id, message_id) DO UPDATE SET session_id = excluded.session_id, created_at = excluded.created_at
+      `).run(chatId, messageId, sessionId, now)
+      this.db.query('DELETE FROM bot_messages WHERE created_at < ?').run(now - 30 * 24 * 60 * 60 * 1000)
+    })()
+  }
+
+  sessionForBotMessage(chatId: string, messageId: string): string | null {
+    const row = this.db.query(`
+      SELECT session_id AS sessionId FROM bot_messages WHERE chat_id = ? AND message_id = ?
+    `).get(chatId, messageId) as { sessionId: string } | null
+    return row?.sessionId ?? null
   }
 
   audit(event: string, userId: string | null, sessionId: string | null, detail: string | null): void {

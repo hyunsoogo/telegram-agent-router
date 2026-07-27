@@ -47,4 +47,13 @@ describe('SessionRegistry', () => {
     registry.register(claude, session('claude-project', 'claude'))
     expect(registry.list().map(item => item.id)).toEqual(['claude-project', 'codex-project'])
   })
+
+  test('a live bridge can refresh the task shown in /sessions', () => {
+    const registry = new SessionRegistry<FakeSocket>()
+    const socket = new FakeSocket()
+    registry.register(socket, session('project', 'claude'))
+    expect(registry.update(socket, { summary: 'Reviewing the billing migration' })?.summary)
+      .toBe('Reviewing the billing migration')
+    expect(registry.get('project')?.session.summary).toBe('Reviewing the billing migration')
+  })
 })

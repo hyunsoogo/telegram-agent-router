@@ -48,4 +48,15 @@ describe('RouterStore', () => {
     expect(second.code).toBe(first.code)
     db.close()
   })
+
+  test('bot answers retain the session needed for reply-based routing', () => {
+    const db = store()
+    db.rememberBotMessage('4004', '91', 'session-a')
+    expect(db.sessionForBotMessage('4004', '91')).toBe('session-a')
+    expect(db.sessionForBotMessage('different-chat', '91')).toBeNull()
+
+    db.rememberBotMessage('4004', '91', 'session-b')
+    expect(db.sessionForBotMessage('4004', '91')).toBe('session-b')
+    db.close()
+  })
 })

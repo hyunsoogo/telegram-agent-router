@@ -1,80 +1,249 @@
 # Telegram Agent Router
 
-A standalone Telegram gateway for local AI coding sessions. One daemon owns the Telegram bot token and routes messages to connected Claude Code and Codex CLI sessions through a shared MCP channel bridge.
+Route Telegram text messages to any live Claude Code or Codex CLI session on a
+computer. Windows, macOS, and Linux servers are supported.
 
-This project is vendor-neutral. It contains no product-specific models, paths, tools, or business logic.
+## Model
 
-## One download, no runtime dependencies
-
-Release artifacts are single executables compiled with Bun. The executable embeds the Telegram client, MCP SDK, WebSocket server, SQLite, and runtime.
-
-End users do not install Bun, Node.js, npm, grammY, SQLite, or separate Claude/Codex plugins.
+Each `(computer × agent kind)` has its own Telegram bot:
 
 ```text
-telegram-agent-router configure
-telegram-agent-router daemon
-telegram-agent-router install --client both --session my-project
-telegram-agent-router access pair <code>
-telegram-agent-router doctor
+workstation-claude bot → every Claude Code session on that workstation
+workstation-codex bot  → every Codex CLI session on that workstation
+server-claude bot      → every Claude Code session on that server
+server-codex bot       → every Codex CLI session on that server
 ```
 
-## Architecture
+Within one bot, `/sessions` shows all live sessions with workspace, Git branch,
+status, and a short task preview. Use `/use 2` or `/use <displayed-selector>` to
+select where subsequent messages go. You can also reply to any earlier agent
+answer; the router switches back to the session that produced that answer.
+
+Claude uses its supported MCP channel notification. Codex uses the Codex App
+Server (`turn/start` and `turn/steer`); the Codex MCP configuration is neither
+used nor installed.
+
+## Install
+
+Prerequisites:
+
+- Claude Code and/or Codex CLI already installed and logged in;
+- [Bun](https://bun.sh/) when building from a Git checkout; and
+- two different BotFather tokens for every computer, one for Claude and one for
+  Codex.
+
+The recommended bot username format is:
 
 ```text
-Telegram Bot API
-       |
-       v
-router daemon (single long-poller + access control + SQLite)
-       |
-       +-- local WebSocket --> MCP bridge --> Claude Code session
-       +-- local WebSocket --> MCP bridge --> Codex CLI session
+hyunsoogo_<computer>_claude_bot
+hyunsoogo_<computer>_codex_bot
 ```
 
-The daemon is the only Telegram `getUpdates` consumer. MCP bridge processes never receive the bot token. Duplicate bridge processes with the same session ID become standby connections and cannot steal inbound messages from the primary session.
+For example, the `hp`, `mac`, and `erp` computers use six independent bots:
 
-## Quick start from a release binary
+```text
+hyunsoogo_hp_claude_bot       hyunsoogo_hp_codex_bot
+hyunsoogo_mac_claude_bot      hyunsoogo_mac_codex_bot
+hyunsoogo_erp_claude_bot      hyunsoogo_erp_codex_bot
+```
 
-Set the bot token without placing it in shell history, then configure local state:
+### Windows
 
 ```powershell
-$env:TELEGRAM_BOT_TOKEN = "<BotFather token>"
-.\telegram-agent-router.exe configure
+git clone https://github.com/hyunsoogo/telegram-agent-router.git
+cd telegram-agent-router
+bun install --frozen-lockfile
+bun run build:windows
+.\release\telegram-agent-router-windows-x64.exe install --client both
+telegram-agent-router doctor --profile all
 ```
 
-Start the central daemon in one terminal:
+Open a new terminal after installation so the updated user `PATH` is active.
 
-```powershell
-.\telegram-agent-router.exe daemon
+### macOS
+
+```bash
+git clone https://github.com/hyunsoogo/telegram-agent-router.git
+cd telegram-agent-router
+bun install --frozen-lockfile
+bun run build:macos
+
+# Apple Silicon (M1/M2/M3/M4)
+./release/telegram-agent-router-macos-arm64 install --client both
+
+# Intel Mac: use this instead
+# ./release/telegram-agent-router-macos-x64 install --client both
+
+exec zsh -l
+telegram-agent-router doctor --profile all
 ```
 
-Register this same executable with both clients for a project:
+The macOS installer writes per-user LaunchAgents and loads them immediately.
+No `sudo` is required.
 
-```powershell
-.\telegram-agent-router.exe install --client both --session my-project --label "My Project"
+### Linux and headless servers
+
+```bash
+git clone https://github.com/hyunsoogo/telegram-agent-router.git
+cd telegram-agent-router
+bun install --frozen-lockfile
+bun run build:linux
+
+# x86-64
+./release/telegram-agent-router-linux-x64 install --client both
+
+# ARM64 server: use this instead
+# ./release/telegram-agent-router-linux-arm64 install --client both
+
+exec "$SHELL" -l
+telegram-agent-router doctor --profile all
 ```
 
-Restart Claude Code and Codex CLI after registration. Send the Telegram bot a DM. It returns a one-hour pairing code. Approve that code only from a trusted terminal:
+Each installer asks for the Claude and Codex tokens separately with masked
+terminal input. Enter the matching computer's two tokens. For unattended
+installation, set `TELEGRAM_BOT_TOKEN_CLAUDE` and
+`TELEGRAM_BOT_TOKEN_CODEX` only for the duration of the install command.
 
-```powershell
-.\telegram-agent-router.exe access pair ABC123
+This command:
+
+1. creates isolated `claude` and `codex` profile state;
+2. registers one dynamic, user-scoped Claude MCP server;
+3. installs the `codex` launch wrapper and records the real Codex binary;
+4. registers and starts both router services; and
+5. enables restart after reboot/login.
+
+Use `--no-autostart` only when service registration is not wanted. Use
+`--dry-run --binary <compiled-router-path>` to inspect every generated action.
+
+Tokens can also be configured separately:
+
+```text
+telegram-agent-router configure --profile claude
+telegram-agent-router configure --profile codex
+telegram-agent-router install --client both
 ```
 
-Then use `/sessions`, `/use my-project`, and `/status` in Telegram.
+Token values are stored only in the selected daemon profile and are never
+passed to Claude or Codex sessions.
 
-See [docs/install.md](docs/install.md), [docs/architecture.md](docs/architecture.md), and [docs/security.md](docs/security.md).
+### Updating an existing installation
+
+Pull and rebuild for the current platform, then run the same compiled
+`install --client both` command again. Existing tokens, pairings, grants, and
+route history are preserved; the versioned executable, wrappers, MCP
+registration, and automatic-start entries are replaced.
+
+## Automatic start
+
+- Windows: per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+  entries at logon. Starting Claude/Codex also self-heals a stopped daemon.
+- macOS: per-user LaunchAgents, loaded immediately.
+- Linux: enabled `systemd --user` services.
+- Headless Linux server: the installer checks and enables user linger. If the
+  host requires administrator authorization it prints the exact
+  `sudo loginctl enable-linger <user>` follow-up.
+
+Profiles are independent. A revoked Claude token or failed Claude service does
+not stop the Codex bot, and vice versa.
+
+## Pairing and use
+
+The first Telegram message returns a one-hour pairing code. Approve it on the
+same computer and profile shown in the bot response:
+
+```text
+telegram-agent-router access pair ABC123 --profile codex
+```
+
+Then:
+
+```text
+/sessions
+/use 1
+/status
+```
+
+If only one permitted session is online, it is selected automatically.
+Replying to an agent answer selects the session that sent it before delivering
+the new message. Answer-to-session mappings contain no message text and expire
+after 30 days. This makes it possible to jump between sessions by replying to
+their earlier answers without running `/use` each time.
+
+`/sessions` uses this shape:
+
+```text
+1. Claude · a1b2c3d4 · KIP-AI · main · Reviewing router changes [active]
+2. Claude · e5f6a7b8 · KIP-AI · main · started 09:24 [active]
+```
+
+The eight-character value is a unique selector, not a task name. Choose either
+`/use 1` or `/use a1b2c3d4`. Claude updates the short task text through the
+router MCP tool; Codex uses its thread name and preview. Until a task summary is
+available, the session start time is shown.
+
+Successful delivery is audited only after the Claude channel or Codex App
+Server accepts the input. Disconnects and timeouts return an explicit Telegram
+error instead of silently dropping the message.
+
+## Session lifecycle
+
+Claude session IDs are generated dynamically from the computer, workspace, and
+Claude parent process, so multiple terminals in the same repository remain
+separately selectable.
+
+The installed Codex wrapper preserves the working directory and arguments,
+ensures the Codex router is healthy, and runs the real CLI against the managed
+App Server:
+
+```text
+codex --remote ws://127.0.0.1:<profile-port> ...
+```
+
+Loaded App Server threads become Telegram sessions. Their final assistant
+answer is sent back to the Telegram chat that supplied the turn. Privileged
+approval and structured-input prompts are not auto-approved; use the attached
+terminal for those interactions.
+
+## Diagnostics
+
+```text
+telegram-agent-router doctor --profile all
+telegram-agent-router doctor --profile claude
+telegram-agent-router doctor --profile codex
+```
+
+State:
+
+```text
+~/.telegram-agent-router/claude/
+~/.telegram-agent-router/codex/
+```
+
+Local control ports bind to `127.0.0.1` only. See
+[`docs/architecture-v2.md`](docs/architecture-v2.md) for lifecycle, failure
+handling, and security boundaries.
 
 ## Development
 
-Bun is required only for building the project:
-
-```bash
+```text
 bun install
 bun test
 bun x tsc --noEmit
 bun run check
-bun run build
 ```
 
-## Status
+The live Codex multi-client smoke test is opt-in:
 
-Private MVP. Text messages and reply/reaction/edit tools are implemented. Attachments, service installation, and signed release publishing remain before a public release.
+```powershell
+$env:ROUTER_CODEX_INTEGRATION='1'
+bun test test\codex-app-server.integration.test.ts
+```
+
+Release builds:
+
+```text
+bun run build:windows
+bun run build:linux
+bun run build:macos
+bun run build:all
+```
