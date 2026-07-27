@@ -2,6 +2,7 @@ import { basename } from 'node:path'
 import type { RouterConfig } from './paths.js'
 import type { InboundEvent, SessionDescriptor } from './protocol.js'
 import { VERSION } from './version.js'
+import type { CodexThread, CodexThreadStatus } from './codex-client-observer.js'
 
 type JsonRpcId = number | string
 
@@ -9,27 +10,6 @@ type PendingRequest = {
   resolve(value: unknown): void
   reject(error: Error): void
   timer: ReturnType<typeof setTimeout>
-}
-
-type ThreadStatus = {
-  type: 'notLoaded' | 'idle' | 'systemError' | 'active'
-  activeFlags?: string[]
-}
-
-type CodexThread = {
-  id: string
-  name?: string | null
-  preview: string
-  cwd: string
-  createdAt: number
-  parentThreadId?: string | null
-  gitInfo?: { branch?: string | null } | null
-  status: ThreadStatus
-  turns?: Array<{
-    id: string
-    status: 'completed' | 'interrupted' | 'failed' | 'inProgress'
-    error?: { message?: string } | null
-  }>
 }
 
 type RoutedTurn = {
@@ -108,6 +88,9 @@ export class CodexAppServer {
   private readonly routedTurns = new Map<string, RoutedTurn>()
   private readonly deliveryQueues = new Map<string, Promise<void>>()
   private readonly subscribedThreads = new Set<string>()
+  private readonly clientThreads = new Map<string, string>()
+  private readonly threadClients = new Map<string, Set<string>>()
+  private readonly subscribingThreads = new Map<string, Promise<void>>()
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private recovering = false
 
@@ -143,15 +126,39 @@ export class CodexAppServer {
 
   list(): SessionDescriptor[] {
     return [...this.threads.values()]
-      .filter(thread => !thread.parentThreadId && thread.status.type !== 'notLoaded')
+      .filter(thread => this.threadClients.has(thread.id) && !thread.parentThreadId && thread.status.type !== 'notLoaded')
       .map(thread => this.toSession(thread))
       .sort((a, b) => a.label.localeCompare(b.label))
   }
 
   get(sessionId: string): SessionDescriptor | undefined {
     const thread = this.threads.get(sessionId)
-    if (!thread || thread.parentThreadId || thread.status.type === 'notLoaded') return undefined
+    if (!this.threadClients.has(sessionId) || !thread || thread.parentThreadId || thread.status.type === 'notLoaded') {
+      return undefined
+    }
     return this.toSession(thread)
+  }
+
+  clientAttached(clientId: string, thread: CodexThread): void {
+    if (thread.parentThreadId) return
+    const previousThreadId = this.clientThreads.get(clientId)
+    if (previousThreadId === thread.id) {
+      this.threads.set(thread.id, thread)
+      return
+    }
+    if (previousThreadId) this.removeClientFromThread(clientId, previousThreadId)
+    this.clientThreads.set(clientId, thread.id)
+    const clients = this.threadClients.get(thread.id) ?? new Set<string>()
+    clients.add(clientId)
+    this.threadClients.set(thread.id, clients)
+    this.threads.set(thread.id, thread)
+  }
+
+  clientDetached(clientId: string): void {
+    const threadId = this.clientThreads.get(clientId)
+    if (!threadId) return
+    this.clientThreads.delete(clientId)
+    this.removeClientFromThread(clientId, threadId)
   }
 
   async deliver(sessionId: string, event: InboundEvent): Promise<void> {
@@ -167,7 +174,8 @@ export class CodexAppServer {
 
   private async deliverNow(sessionId: string, event: InboundEvent): Promise<void> {
     const thread = this.threads.get(sessionId)
-    if (!thread) throw new Error('Codex session is no longer loaded')
+    if (!this.threadClients.has(sessionId) || !thread) throw new Error('Codex session is no longer connected')
+    await this.ensureSubscribed(sessionId)
     const input = [{ type: 'text', text: codexTelegramInputText(event) }]
     let turnId = this.activeTurns.get(sessionId)
 
@@ -295,15 +303,10 @@ export class CodexAppServer {
 
   private async refreshThreads(): Promise<void> {
     if (!this.socket) return
-    const response = await this.request('thread/loaded/list', { limit: 200 }) as { data?: string[] }
-    const loaded = new Set(response.data ?? [])
-    for (const id of loaded) {
+    for (const id of this.threadClients.keys()) {
       try {
-        const result = await this.request(
-          this.subscribedThreads.has(id) ? 'thread/read' : 'thread/resume',
-          this.subscribedThreads.has(id) ? { threadId: id, includeTurns: false } : { threadId: id },
-        ) as { thread?: CodexThread }
-        this.subscribedThreads.add(id)
+        await this.ensureSubscribed(id)
+        const result = await this.request('thread/read', { threadId: id, includeTurns: false }) as { thread?: CodexThread }
         if (result.thread) this.threads.set(id, result.thread)
       } catch (error) {
         if (!String(error).includes('no rollout found for thread id')) {
@@ -311,11 +314,40 @@ export class CodexAppServer {
         }
       }
     }
-    for (const id of this.threads.keys()) {
-      if (loaded.has(id)) continue
-      this.threads.delete(id)
-      this.subscribedThreads.delete(id)
-    }
+  }
+
+  private ensureSubscribed(threadId: string): Promise<void> {
+    if (this.subscribedThreads.has(threadId)) return Promise.resolve()
+    const existing = this.subscribingThreads.get(threadId)
+    if (existing) return existing
+    const subscription = (async () => {
+      const result = await this.request('thread/resume', { threadId }) as { thread?: CodexThread }
+      if (!this.threadClients.has(threadId)) {
+        await this.request('thread/unsubscribe', { threadId }).catch(() => {})
+        return
+      }
+      this.subscribedThreads.add(threadId)
+      if (result.thread) this.threads.set(threadId, result.thread)
+    })()
+    this.subscribingThreads.set(threadId, subscription)
+    return subscription.finally(() => {
+      if (this.subscribingThreads.get(threadId) === subscription) this.subscribingThreads.delete(threadId)
+    })
+  }
+
+  private removeClientFromThread(clientId: string, threadId: string): void {
+    const clients = this.threadClients.get(threadId)
+    clients?.delete(clientId)
+    if (clients?.size) return
+    this.threadClients.delete(threadId)
+    this.threads.delete(threadId)
+    this.activeTurns.delete(threadId)
+    if (!this.subscribedThreads.delete(threadId)) return
+    void this.request('thread/unsubscribe', { threadId }).catch(error => {
+      if (this.socket) {
+        process.stderr.write(`telegram-agent-router[codex]: cannot unsubscribe thread ${threadId}: ${String(error)}\n`)
+      }
+    })
   }
 
   private request(method: string, params: unknown): Promise<unknown> {
@@ -383,12 +415,12 @@ export class CodexAppServer {
     const threadId = typeof params.threadId === 'string' ? params.threadId : undefined
     if (method === 'thread/started') {
       const thread = params.thread as CodexThread | undefined
-      if (thread) this.threads.set(thread.id, thread)
+      if (thread && this.threadClients.has(thread.id)) this.threads.set(thread.id, thread)
       return
     }
     if (method === 'thread/status/changed' && threadId) {
       const thread = this.threads.get(threadId)
-      if (thread && params.status) thread.status = params.status as ThreadStatus
+      if (thread && params.status) thread.status = params.status as CodexThreadStatus
       return
     }
     if (method === 'turn/started' && threadId) {
@@ -462,6 +494,7 @@ export class CodexAppServer {
     this.threads.clear()
     this.activeTurns.clear()
     this.subscribedThreads.clear()
+    this.subscribingThreads.clear()
     try {
       for (let attempt = 1; !this.stopped; attempt += 1) {
         try {

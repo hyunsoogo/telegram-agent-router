@@ -213,17 +213,19 @@ Claude parent process, so multiple terminals in the same repository remain
 separately selectable.
 
 The installed Codex wrapper preserves the working directory and arguments,
-ensures the Codex router is healthy, and runs the real CLI against the managed
-App Server:
+ensures the Codex router is healthy, and runs the real CLI through a
+single-use authenticated router proxy to the managed App Server:
 
 ```text
 codex --remote ws://127.0.0.1:<profile-port> ...
 ```
 
-Loaded App Server threads become Telegram sessions. Their final assistant
-answer is sent back to the Telegram chat that supplied the turn. Privileged
-approval and structured-input prompts are not auto-approved; use the attached
-terminal for those interactions.
+Only root threads attached to a currently connected Codex CLI proxy become
+Telegram sessions. Closing the CLI removes its thread from `/sessions`
+immediately; persisted or merely loaded App Server threads are not listed.
+Final assistant answers are sent back to the Telegram chat that supplied the
+turn. Privileged approval and structured-input prompts are not auto-approved;
+use the attached terminal for those interactions.
 
 The managed App Server process does not inherit the router's standard output or
 error streams, so conversation and tool output is not mirrored into an

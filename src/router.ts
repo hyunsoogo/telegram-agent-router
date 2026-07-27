@@ -3,6 +3,7 @@ import type { ReactionTypeEmoji } from 'grammy/types'
 import type { ServerWebSocket } from 'bun'
 import { randomUUID } from 'node:crypto'
 import { CodexAppServer } from './codex-app-server.js'
+import { CodexClientObserver } from './codex-client-observer.js'
 import { loadBotToken, loadConfig, statePaths, type RouterProfile } from './paths.js'
 import { parseBridgeMessage, type InboundEvent, type RouterAction, type RouterToBridge, type SessionDescriptor } from './protocol.js'
 import { SessionRegistry } from './session-registry.js'
@@ -10,9 +11,9 @@ import { acquireDaemonLock } from './lock.js'
 import { RouterStore } from './store.js'
 import { VERSION } from './version.js'
 
-type SocketData = {
-  sessionId?: string
-}
+type SocketData =
+  | { kind: 'claude'; sessionId?: string }
+  | { kind: 'codex'; clientId: string; upstream: WebSocket; observer: CodexClientObserver }
 
 type BridgeSocket = ServerWebSocket<SocketData>
 
@@ -107,6 +108,7 @@ async function runOwnedDaemon(paths: ReturnType<typeof statePaths>): Promise<voi
   const store = new RouterStore(paths.database, paths.profile)
   const registry = new SessionRegistry<BridgeSocket>()
   const pendingDeliveries = new Map<string, PendingDelivery>()
+  const codexClientTickets = new Map<string, number>()
   const bot = new Bot(token)
   const rememberBotMessage = (chatId: string, messageId: string, sessionId: string): void => {
     try {
@@ -148,10 +150,29 @@ async function runOwnedDaemon(paths: ReturnType<typeof statePaths>): Promise<voi
     return codex ? codex.list() : registry.list()
   }
 
+  async function connectCodexClientUpstream(): Promise<WebSocket> {
+    const upstream = new WebSocket(`ws://127.0.0.1:${config.appServerPort}`)
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        upstream.close()
+        reject(new Error('Codex App Server connection timed out'))
+      }, 2_000)
+      upstream.addEventListener('open', () => {
+        clearTimeout(timer)
+        resolve()
+      }, { once: true })
+      upstream.addEventListener('error', () => {
+        clearTimeout(timer)
+        reject(new Error('Codex App Server connection failed'))
+      }, { once: true })
+    })
+    return upstream
+  }
+
   const createServer = () => Bun.serve<SocketData>({
     hostname: config.host,
     port: config.port,
-    fetch(request, bunServer) {
+    async fetch(request, bunServer) {
       const url = new URL(request.url)
       if (url.pathname === '/health') {
         if (url.searchParams.get('secret') !== config.secret) return new Response('unauthorized', { status: 401 })
@@ -165,17 +186,83 @@ async function runOwnedDaemon(paths: ReturnType<typeof statePaths>): Promise<voi
           uptime_s: Math.round(process.uptime()),
         })
       }
+      if (url.pathname === '/codex-client/register') {
+        if (!codex) return new Response('Codex profile required', { status: 404 })
+        if (request.method !== 'POST') return new Response('method not allowed', { status: 405 })
+        if (request.headers.get('authorization') !== `Bearer ${config.secret}`) {
+          return new Response('unauthorized', { status: 401 })
+        }
+        const now = Date.now()
+        for (const [ticket, expiresAt] of codexClientTickets) {
+          if (expiresAt <= now) codexClientTickets.delete(ticket)
+        }
+        const ticket = randomUUID()
+        codexClientTickets.set(ticket, now + 30_000)
+        return Response.json({
+          url: `ws://127.0.0.1:${config.port}/codex-client?ticket=${encodeURIComponent(ticket)}`,
+        })
+      }
+      if (url.pathname === '/codex-client') {
+        if (!codex) return new Response('Codex profile required', { status: 404 })
+        const ticket = url.searchParams.get('ticket')
+        const expiresAt = ticket ? codexClientTickets.get(ticket) : undefined
+        if (!ticket || !expiresAt || expiresAt <= Date.now()) {
+          if (ticket) codexClientTickets.delete(ticket)
+          return new Response('unauthorized', { status: 401 })
+        }
+        codexClientTickets.delete(ticket)
+        let upstream: WebSocket
+        try {
+          upstream = await connectCodexClientUpstream()
+        } catch (error) {
+          return new Response(String(error), { status: 503 })
+        }
+        const upgraded = bunServer.upgrade(request, {
+          data: {
+            kind: 'codex',
+            clientId: randomUUID(),
+            upstream,
+            observer: new CodexClientObserver(),
+          },
+        })
+        if (!upgraded) upstream.close()
+        return upgraded ? undefined : new Response('upgrade failed', { status: 400 })
+      }
       if (url.pathname === '/bridge') {
         if (paths.profile !== 'claude') return new Response('bridge is Claude-only', { status: 404 })
         if (url.searchParams.get('secret') !== config.secret) return new Response('unauthorized', { status: 401 })
-        return bunServer.upgrade(request, { data: {} })
+        return bunServer.upgrade(request, { data: { kind: 'claude' } })
           ? undefined
           : new Response('upgrade failed', { status: 400 })
       }
       return new Response('not found', { status: 404 })
     },
     websocket: {
+      open(ws) {
+        if (ws.data.kind !== 'codex') return
+        const { clientId, observer, upstream } = ws.data
+        upstream.addEventListener('message', event => {
+          const raw = String(event.data)
+          const thread = observer.observeServerMessage(raw)
+          if (thread) codex?.clientAttached(clientId, thread)
+          try {
+            ws.send(raw)
+          } catch {}
+        })
+        upstream.addEventListener('close', () => ws.close())
+        upstream.addEventListener('error', () => ws.close())
+      },
       message(ws, raw) {
+        if (ws.data.kind === 'codex') {
+          const message = typeof raw === 'string' ? raw : new TextDecoder().decode(raw)
+          ws.data.observer.observeClientMessage(message)
+          try {
+            ws.data.upstream.send(message)
+          } catch {
+            ws.close()
+          }
+          return
+        }
         try {
           const message = parseBridgeMessage(typeof raw === 'string' ? raw : new TextDecoder().decode(raw))
           if (message.type === 'heartbeat') return
@@ -197,12 +284,13 @@ async function runOwnedDaemon(paths: ReturnType<typeof statePaths>): Promise<voi
             return
           }
           if (message.type === 'action') {
+            const sessionId = ws.data.sessionId
             void performAction(bot, store, message.action)
               .then(result => {
-                if (message.action.kind === 'reply' && ws.data.sessionId) {
+                if (message.action.kind === 'reply' && sessionId) {
                   const messageIds = (result as { message_ids?: number[] }).message_ids ?? []
                   for (const messageId of messageIds) {
-                    rememberBotMessage(message.action.chat_id, String(messageId), ws.data.sessionId)
+                    rememberBotMessage(message.action.chat_id, String(messageId), sessionId)
                   }
                 }
                 ws.send(json({ type: 'action_result', requestId: message.requestId, ok: true, result }))
@@ -223,6 +311,11 @@ async function runOwnedDaemon(paths: ReturnType<typeof statePaths>): Promise<voi
         }
       },
       close(ws) {
+        if (ws.data.kind === 'codex') {
+          codex?.clientDetached(ws.data.clientId)
+          ws.data.upstream.close()
+          return
+        }
         for (const [deliveryId, pending] of pendingDeliveries) {
           if (pending.socket !== ws) continue
           clearTimeout(pending.timer)

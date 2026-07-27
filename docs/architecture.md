@@ -38,10 +38,11 @@ The bridge also exposes outbound tools such as `reply`, `react`, and `edit_messa
 
 ### Codex App Server adapter
 
-The Codex profile daemon starts and supervises `codex app-server`, discovers
-loaded Codex threads, and delivers Telegram turns with `turn/start` or
-`turn/steer`. Codex does not install or use an MCP router entry. Its wrapper
-connects interactive Codex clients to the managed App Server over loopback.
+The Codex profile daemon starts and supervises `codex app-server`, proxies each
+interactive Codex client connection, and delivers Telegram turns with
+`turn/start` or `turn/steer`. The proxy observes only the root thread started or
+resumed by that client, so persisted App Server threads never appear as live
+sessions. Codex does not install or use an MCP router entry.
 
 ## Routing
 
@@ -57,6 +58,7 @@ If exactly one visible session is online, the daemon may select it automatically
 
 - Bind only to `127.0.0.1` by default.
 - Authenticate Claude MCP bridges with a random router secret stored in the state directory.
+- Admit Codex client proxies with short-lived, single-use registration tickets.
 - Store the Telegram token separately from SQLite.
 - Require terminal-side approval for pairing. A Telegram message cannot approve itself.
 - Do not broadcast inbound messages to every session.

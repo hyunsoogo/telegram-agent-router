@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import { CodexAppServer } from '../src/codex-app-server.js'
+import type { CodexThread } from '../src/codex-client-observer.js'
 
 const integration = process.env.ROUTER_CODEX_INTEGRATION === '1' ? test : test.skip
 const turnIntegration = process.env.ROUTER_CODEX_TURN_INTEGRATION === '1' ? test : test.skip
@@ -47,24 +48,27 @@ integration('connects to and initializes the installed Codex App Server', async 
   }, async () => {})
   let peer: Awaited<ReturnType<typeof connectClient>> | undefined
   let threadId: string | undefined
+  const cwd = process.cwd()
   try {
     await adapter.start()
     expect(adapter.list()).toBeArray()
     peer = await connectClient('ws://127.0.0.1:47923')
     const started = await peer.request('thread/start', {
-      cwd: 'C:\\tmp',
+      cwd,
       ephemeral: false,
-    }) as { thread?: { id?: string } }
+    }) as { thread?: CodexThread }
     threadId = started.thread?.id
     expect(threadId).toBeTruthy()
+    adapter.clientAttached('integration-peer', started.thread!)
     for (let attempt = 0; attempt < 20 && !adapter.get(threadId!); attempt += 1) {
       await Bun.sleep(200)
     }
     expect(adapter.get(threadId!)).toMatchObject({
       client: 'codex',
-      workspace: 'C:\\tmp',
+      workspace: cwd,
     })
   } finally {
+    adapter.clientDetached('integration-peer')
     if (peer && threadId) await peer.request('thread/delete', { threadId }).catch(() => {})
     peer?.socket.close()
     await adapter.stop()
@@ -86,17 +90,19 @@ turnIntegration('injects a Telegram turn and receives the final Codex answer', a
   }, async result => resolveOutput(result.text))
   let peer: Awaited<ReturnType<typeof connectClient>> | undefined
   let threadId: string | undefined
+  const cwd = process.cwd()
   try {
     await adapter.start()
     peer = await connectClient('ws://127.0.0.1:47933')
     const started = await peer.request('thread/start', {
-      cwd: 'C:\\tmp',
+      cwd,
       ephemeral: false,
       sandbox: 'read-only',
       approvalPolicy: 'never',
-    }) as { thread?: { id?: string } }
+    }) as { thread?: CodexThread }
     threadId = started.thread?.id
     expect(threadId).toBeTruthy()
+    adapter.clientAttached('turn-integration-peer', started.thread!)
     for (let attempt = 0; attempt < 30 && !adapter.get(threadId!); attempt += 1) await Bun.sleep(200)
     await adapter.deliver(threadId!, {
       content: 'Reply with exactly ROUTER_SMOKE_OK and do nothing else.',
@@ -114,6 +120,7 @@ turnIntegration('injects a Telegram turn and receives the final Codex answer', a
     ])
     expect(text).toContain('ROUTER_SMOKE_OK')
   } finally {
+    adapter.clientDetached('turn-integration-peer')
     if (peer && threadId) await peer.request('thread/delete', { threadId }).catch(() => {})
     peer?.socket.close()
     await adapter.stop()

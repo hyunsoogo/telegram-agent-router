@@ -11,7 +11,10 @@
 
 ### Loopback only
 
-The daemon binds to `127.0.0.1` by default. Bridge and health endpoints require a random secret stored with mode `0600` where supported.
+The daemon binds to `127.0.0.1` by default. Bridge and health endpoints require
+a random secret stored with mode `0600` where supported. Codex launchers use the
+secret once to obtain a 30-second, single-use proxy ticket; the long-lived CLI
+command line contains only that ticket, not the profile secret.
 
 ### One daemon
 
@@ -22,7 +25,7 @@ The daemon binds to `127.0.0.1` by default. Bridge and health endpoints require 
 The first Claude MCP bridge registered for a session ID is primary. Later
 bridges with the same ID are standby and receive no inbound messages. When the
 primary disconnects, the oldest standby is promoted. Codex sessions instead map
-directly to App Server threads.
+to root App Server threads observed on currently connected CLI proxy sockets.
 
 ### Terminal-side pairing
 

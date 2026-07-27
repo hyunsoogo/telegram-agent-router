@@ -63,8 +63,9 @@ Claude bot token                         Codex bot token
 ```
 
 Tokens are read only by their profile daemon. Claude MCP bridges receive a
-loopback URL and profile secret; Codex clients receive the managed App Server
-loopback URL. Neither receives a Telegram token.
+loopback URL and profile secret. Codex clients receive a single-use proxy URL;
+the router forwards that connection to the managed App Server and tracks the
+root thread chosen on that exact socket. Neither receives a Telegram token.
 
 ## Session model
 
@@ -79,12 +80,15 @@ therefore remain independently selectable. The descriptor contains:
 - optional task summary; and
 - start time.
 
-Codex sessions correspond one-to-one with App Server threads. The router reads
-thread ID, name, preview, current directory, Git branch, and status from the App
-Server. Thread IDs are not exposed as the primary UI: `/sessions` shows a short,
-unique selector plus human-readable context. `/use` accepts the full ID, a
-unique prefix or suffix, the workspace label, or the displayed list number.
-Replying to an earlier bot answer also selects the session that produced it.
+Codex sessions correspond one-to-one with connected CLI proxy sockets and their
+current root App Server threads. The router reads thread ID, name, preview,
+current directory, Git branch, and status from the App Server. Closing a proxy
+socket removes that session immediately; persisted and unowned loaded threads
+remain resumable by Codex but are excluded from `/sessions`. Thread IDs are not
+exposed as the primary UI: `/sessions` shows a short, unique selector plus
+human-readable context. `/use` accepts the full ID, a unique prefix or suffix,
+the workspace label, or the displayed list number. Replying to an earlier bot
+answer also selects the session that produced it.
 
 Example:
 
@@ -123,14 +127,16 @@ WebSocket write alone is not considered delivery.
 ### Codex
 
 The Codex profile starts and supervises `codex app-server --listen ws://...`.
-The router initializes one JSON-RPC connection and discovers loaded threads.
+The router initializes one JSON-RPC adapter connection. Each Codex CLI connects
+through a ticketed router proxy that records the root thread started or resumed
+on that socket.
 
 - idle thread: `turn/start`;
 - active thread with a known turn: `turn/steer`;
 - final assistant output: accumulated from agent message events and sent to the
   Telegram chat associated with that turn;
-- App Server process exit: restart with bounded exponential backoff, reconnect,
-  and resubscribe to loaded threads.
+- App Server process exit: restart with bounded exponential backoff and require
+  Codex clients to reconnect before their threads are listed again.
 
 Command/file approvals and structured user-input requests must not hang
 silently. Unsupported prompts are rejected with an explicit Telegram notice;
@@ -143,9 +149,10 @@ no fixed session name, so every Claude process registers dynamically.
 
 Installation also places a thin `codex` wrapper before the real executable on
 the user's path. It preserves arguments and working directory, ensures the
-Codex profile daemon is healthy, and invokes the real binary with the managed
-App Server's `--remote` URL. The resolved real Codex path is stored at install
-time to prevent wrapper recursion.
+Codex profile daemon is healthy, requests a short-lived single-use client
+ticket, and invokes the real binary with the router proxy's `--remote` URL. The
+resolved real Codex path is stored at install time to prevent wrapper
+recursion.
 
 Explicit commands remain available for diagnostics:
 

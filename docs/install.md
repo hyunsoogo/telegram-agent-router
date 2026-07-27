@@ -49,7 +49,8 @@ Claude and Codex intentionally use different transports:
 - Claude registers one dynamic user-scoped MCP bridge. Each interactive Claude
   process gets its own routable session.
 - Codex does not use MCP. Its managed wrapper preserves the working directory
-  and connects the real CLI to the supervised Codex App Server WebSocket.
+  and connects the real CLI through a single-use router proxy to the supervised
+  Codex App Server WebSocket.
 
 Automatic start is enabled by default:
 
