@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import {
+  claudeWrapperContent,
   codexWrapperContent,
   installationCommands,
+  installClaudeWrapper,
   installCodexWrapper,
   printableCommand,
+  resolveClaudeBinaryPath,
   resolveCodexBinaryPath,
 } from '../src/installer.js'
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
@@ -29,12 +32,13 @@ describe('standalone client installer', () => {
     const commands = installationCommands({
       target: 'both',
       binaryPath: '/opt/telegram-agent-router',
+      claudeBinary: '/opt/claude',
       claudeScope: 'user',
     })
     expect(commands).toHaveLength(1)
     expect(commands[0]).toEqual({
       client: 'claude',
-      argv: ['claude', 'mcp', 'add', '--scope', 'user', 'telegram-router', '--', resolve('/opt/telegram-agent-router'), 'mcp', '--profile', 'claude'],
+      argv: ['/opt/claude', 'mcp', 'add', '--scope', 'user', 'telegram-router', '--', resolve('/opt/telegram-agent-router'), 'mcp', '--profile', 'claude'],
     })
     expect(commands.flatMap(command => command.argv)).not.toContain('bun')
     expect(commands.flatMap(command => command.argv)).not.toContain('node')
@@ -45,11 +49,25 @@ describe('standalone client installer', () => {
     expect(printableCommand(['binary', '--label', 'My Project'])).toBe('binary --label "My Project"')
   })
 
-  test('Codex wrappers preserve all user arguments on Windows and POSIX', () => {
+  test('client wrappers preserve all user arguments', () => {
+    expect(claudeWrapperContent('C:\\Program Files\\router.exe', 'win32')).toContain('launch claude -- %*')
+    expect(claudeWrapperContent('/opt/router', 'linux')).toBe(
+      `#!/bin/sh\n# telegram-agent-router managed Claude wrapper\nexec '/opt/router' launch claude -- "$@"\n`,
+    )
     expect(codexWrapperContent('C:\\Program Files\\router.exe', 'win32')).toContain('launch codex -- %*')
     expect(codexWrapperContent('/opt/router', 'linux')).toBe(
       `#!/bin/sh\n# telegram-agent-router managed Codex wrapper\nexec '/opt/router' launch codex -- "$@"\n`,
     )
+  })
+
+  test('resolves a Claude symlink to its real executable', () => {
+    const home = temporaryHome()
+    const binary = join(home, 'claude-real')
+    const link = join(home, 'claude')
+    writeFileSync(binary, 'claude binary')
+    symlinkSync(binary, link)
+
+    expect(resolveClaudeBinaryPath(link, 'linux')).toBe(realpathSync(binary))
   })
 
   test('resolves a Codex symlink to its real executable', () => {
@@ -77,6 +95,23 @@ describe('standalone client installer', () => {
     expect(lstatSync(link).isSymbolicLink()).toBe(false)
     expect(readFileSync(link, 'utf8')).toBe(codexWrapperContent('/opt/router', 'linux'))
     expect(readFileSync(binary, 'utf8')).toBe('original codex binary')
+  })
+
+  test('replaces a Claude symlink with a channel-enabled wrapper', async () => {
+    const home = temporaryHome()
+    const directory = join(home, '.local', 'bin')
+    const binary = join(home, 'claude-real')
+    const link = join(directory, 'claude')
+    mkdirSync(directory, { recursive: true })
+    writeFileSync(binary, 'original claude binary')
+    chmodSync(binary, 0o755)
+    symlinkSync(binary, link)
+
+    await installClaudeWrapper('/opt/router', false, 'linux', false, home)
+
+    expect(lstatSync(link).isSymbolicLink()).toBe(false)
+    expect(readFileSync(link, 'utf8')).toBe(claudeWrapperContent('/opt/router', 'linux'))
+    expect(readFileSync(binary, 'utf8')).toBe('original claude binary')
   })
 
   test('refuses to overwrite an unmanaged Codex executable', async () => {

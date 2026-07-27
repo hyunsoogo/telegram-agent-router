@@ -20,10 +20,17 @@ export function codexLaunchArgv(
   appServerPort: number,
   cwd: string,
   args: string[],
+  interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY),
 ): string[] {
+  if (!interactive) return [binaryPath, ...args]
   const passthrough = new Set([
-    'app-server', 'completion', 'debug', 'features', 'login', 'logout', 'mcp', 'cloud',
+    'app-server', 'app', 'apply', 'archive', 'cloud', 'completion', 'debug', 'delete',
+    'doctor', 'e', 'exec', 'exec-server', 'features', 'help', 'login', 'logout', 'mcp',
+    'mcp-server', 'plugin', 'remote-control', 'review', 'sandbox', 'unarchive', 'update',
   ])
+  if (args.some(value => ['--help', '-h', '--version', '-V'].includes(value))) {
+    return [binaryPath, ...args]
+  }
   const firstCommand = args.find(value => !value.startsWith('-'))
   if (firstCommand && passthrough.has(firstCommand)) return [binaryPath, ...args]
   const hasExplicitCwd = args.some(value => value === '-C' || value === '--cd')
@@ -42,7 +49,9 @@ export async function launchCodex(
   args: string[],
 ): Promise<number> {
   if (!config.appServerPort) throw new Error('codex appServerPort is not configured')
-  if (!await healthy(config)) {
+  const argv = codexLaunchArgv(binaryPath, config.appServerPort, process.cwd(), args)
+  const routed = argv[1] === '--remote'
+  if (routed && !await healthy(config)) {
     const routerBinary = process.execPath
     const daemon = Bun.spawn([routerBinary, 'daemon', '--profile', 'codex'], {
       stdin: 'ignore',
@@ -52,11 +61,10 @@ export async function launchCodex(
     daemon.unref()
     for (let attempt = 0; attempt < 40 && !await healthy(config); attempt += 1) await Bun.sleep(250)
   }
-  if (!await healthy(config)) {
+  if (routed && !await healthy(config)) {
     throw new Error(`codex router did not become healthy; run doctor --profile codex (${paths.config})`)
   }
 
-  const argv = codexLaunchArgv(binaryPath, config.appServerPort, process.cwd(), args)
   const child = Bun.spawn(argv, {
     cwd: process.cwd(),
     stdin: 'inherit',

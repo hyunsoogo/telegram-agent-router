@@ -22,6 +22,7 @@ export type InstallTarget = RouterProfile | 'both'
 export type InstallOptions = {
   target: InstallTarget
   binaryPath?: string
+  claudeBinary?: string
   codexBinary?: string
   claudeScope?: 'local' | 'user' | 'project'
   autostart?: boolean
@@ -33,7 +34,12 @@ export type InstallCommand = {
   argv: string[]
 }
 
-const CODEX_WRAPPER_MARKER = 'telegram-agent-router managed Codex wrapper'
+type WrapperClient = 'claude' | 'codex'
+
+const WRAPPER_MARKERS: Record<WrapperClient, string> = {
+  claude: 'telegram-agent-router managed Claude wrapper',
+  codex: 'telegram-agent-router managed Codex wrapper',
+}
 const MAX_WRAPPER_BYTES = 16 * 1024
 
 export function resolveBinaryPath(explicit?: string): string {
@@ -51,7 +57,7 @@ export function installationCommands(options: InstallOptions): InstallCommand[] 
   return [{
     client: 'claude',
     argv: [
-      'claude', 'mcp', 'add',
+      options.claudeBinary ?? 'claude', 'mcp', 'add',
       '--scope', options.claudeScope ?? 'user',
       'telegram-router',
       '--',
@@ -72,10 +78,22 @@ export function codexWrapperContent(
   binaryPath: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
+  const marker = WRAPPER_MARKERS.codex
   if (platform === 'win32') {
-    return `@echo off\r\nrem ${CODEX_WRAPPER_MARKER}\r\n"${binaryPath.replaceAll('"', '""')}" launch codex -- %*\r\n`
+    return `@echo off\r\nrem ${marker}\r\n"${binaryPath.replaceAll('"', '""')}" launch codex -- %*\r\n`
   }
-  return `#!/bin/sh\n# ${CODEX_WRAPPER_MARKER}\nexec ${shellQuote(binaryPath)} launch codex -- "$@"\n`
+  return `#!/bin/sh\n# ${marker}\nexec ${shellQuote(binaryPath)} launch codex -- "$@"\n`
+}
+
+export function claudeWrapperContent(
+  binaryPath: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const marker = WRAPPER_MARKERS.claude
+  if (platform === 'win32') {
+    return `@echo off\r\nrem ${marker}\r\n"${binaryPath.replaceAll('"', '""')}" launch claude -- %*\r\n`
+  }
+  return `#!/bin/sh\n# ${marker}\nexec ${shellQuote(binaryPath)} launch claude -- "$@"\n`
 }
 
 function lstatIfPresent(path: string): Stats | undefined {
@@ -87,17 +105,24 @@ function lstatIfPresent(path: string): Stats | undefined {
   }
 }
 
-function isManagedCodexWrapper(path: string, stats: Stats, platform: NodeJS.Platform): boolean {
+function isManagedWrapper(
+  path: string,
+  stats: Stats,
+  client: WrapperClient,
+  platform: NodeJS.Platform,
+): boolean {
   if (!stats.isFile() || stats.size > MAX_WRAPPER_BYTES) return false
   const content = readFileSync(path, 'utf8')
-  if (content.includes(CODEX_WRAPPER_MARKER)) return true
+  if (content.includes(WRAPPER_MARKERS[client])) return true
+  if (client === 'claude') return false
   return platform === 'win32'
     ? content.includes(' launch codex -- %*')
     : content.includes(' launch codex -- "$@"')
 }
 
-export function resolveCodexBinaryPath(
+function resolveClientBinaryPath(
   candidate: string | undefined,
+  client: WrapperClient,
   platform: NodeJS.Platform = process.platform,
 ): string | undefined {
   if (!candidate) return undefined
@@ -109,10 +134,25 @@ export function resolveCodexBinaryPath(
     throw new Error(`Codex binary does not resolve to an existing file: ${absolute}`)
   }
   const stats = lstatSync(canonical)
-  if (isManagedCodexWrapper(canonical, stats, platform)) {
-    throw new Error(`Codex binary resolves to the managed router wrapper: ${canonical}; pass --codex-binary with the real Codex executable`)
+  if (isManagedWrapper(canonical, stats, client, platform)) {
+    const label = client === 'claude' ? 'Claude' : 'Codex'
+    throw new Error(`${label} binary resolves to the managed router wrapper: ${canonical}; pass --${client}-binary with the real executable`)
   }
   return canonical
+}
+
+export function resolveClaudeBinaryPath(
+  candidate: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  return resolveClientBinaryPath(candidate, 'claude', platform)
+}
+
+export function resolveCodexBinaryPath(
+  candidate: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  return resolveClientBinaryPath(candidate, 'codex', platform)
 }
 
 function profilePath(platform: NodeJS.Platform): string {
@@ -134,7 +174,7 @@ function installedBinaryPath(platform: NodeJS.Platform): string {
 
 async function copyProgramBinary(sourcePath: string, destination: string): Promise<void> {
   let lastError: unknown
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
     try {
       copyFileSync(sourcePath, destination)
       return
@@ -166,10 +206,11 @@ async function prependWindowsUserPath(directory: string, dryRun: boolean): Promi
 
 function prependPosixPath(directory: string, platform: NodeJS.Platform, dryRun: boolean): void {
   const path = profilePath(platform)
-  const marker = '# telegram-agent-router codex wrapper'
+  const marker = '# telegram-agent-router client wrappers'
+  const legacyMarker = '# telegram-agent-router codex wrapper'
   const block = `${marker}\nexport PATH=${shellQuote(directory)}:"$PATH"\n`
   const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
-  if (existing.includes(marker)) return
+  if (existing.includes(marker) || existing.includes(legacyMarker)) return
   process.stdout.write(`update ${path}\n`)
   if (dryRun) return
   writeFileSync(path, `${existing}${existing && !existing.endsWith('\n') ? '\n' : ''}${block}`)
@@ -205,7 +246,8 @@ async function installProgramBinary(
   return destination
 }
 
-export async function installCodexWrapper(
+async function installClientWrapper(
+  client: WrapperClient,
   binaryPath: string,
   dryRun: boolean,
   platform: NodeJS.Platform = process.platform,
@@ -213,18 +255,22 @@ export async function installCodexWrapper(
   homeDirectory = homedir(),
 ): Promise<string> {
   const directory = join(homeDirectory, '.local', 'bin')
-  const path = join(directory, platform === 'win32' ? 'codex.cmd' : 'codex')
+  const path = join(directory, platform === 'win32' ? `${client}.cmd` : client)
   process.stdout.write(`write ${path}\n`)
   if (!dryRun) {
     mkdirSync(directory, { recursive: true })
     const existing = lstatIfPresent(path)
-    if (existing && !existing.isSymbolicLink() && !isManagedCodexWrapper(path, existing, platform)) {
-      throw new Error(`refusing to overwrite existing Codex executable: ${path}; pass --codex-binary with the real executable and move it outside the wrapper path`)
+    if (existing && !existing.isSymbolicLink() && !isManagedWrapper(path, existing, client, platform)) {
+      const label = client === 'claude' ? 'Claude' : 'Codex'
+      throw new Error(`refusing to overwrite existing ${label} executable: ${path}; pass --${client}-binary with the real executable and move it outside the wrapper path`)
     }
     const suffix = `${process.pid}-${Date.now()}`
     const replacement = `${path}.new-${suffix}`
     const previous = `${path}.previous-${suffix}`
-    await Bun.write(replacement, codexWrapperContent(binaryPath, platform))
+    const content = client === 'claude'
+      ? claudeWrapperContent(binaryPath, platform)
+      : codexWrapperContent(binaryPath, platform)
+    await Bun.write(replacement, content)
     if (platform !== 'win32') {
       try { chmodSync(replacement, 0o755) } catch {}
     }
@@ -255,6 +301,26 @@ export async function installCodexWrapper(
     else prependPosixPath(directory, platform, dryRun)
   }
   return path
+}
+
+export function installClaudeWrapper(
+  binaryPath: string,
+  dryRun: boolean,
+  platform: NodeJS.Platform = process.platform,
+  managePath = true,
+  homeDirectory = homedir(),
+): Promise<string> {
+  return installClientWrapper('claude', binaryPath, dryRun, platform, managePath, homeDirectory)
+}
+
+export function installCodexWrapper(
+  binaryPath: string,
+  dryRun: boolean,
+  platform: NodeJS.Platform = process.platform,
+  managePath = true,
+  homeDirectory = homedir(),
+): Promise<string> {
+  return installClientWrapper('codex', binaryPath, dryRun, platform, managePath, homeDirectory)
 }
 
 function healthUrl(profile: RouterProfile): { url: URL; port: number } {
@@ -329,7 +395,7 @@ export async function installClients(options: InstallOptions, dryRun: boolean): 
   const binary = await installProgramBinary(sourceBinary, dryRun, platform)
   for (const command of installationCommands({ ...options, binaryPath: binary })) {
     const remove = [
-      'claude', 'mcp', 'remove',
+      options.claudeBinary ?? 'claude', 'mcp', 'remove',
       '--scope', options.claudeScope ?? 'user',
       'telegram-router',
     ]
@@ -343,6 +409,11 @@ export async function installClients(options: InstallOptions, dryRun: boolean): 
     const child = Bun.spawn(command.argv, { stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' })
     const code = await child.exited
     if (code !== 0) throw new Error(`Claude MCP registration failed with exit code ${code}`)
+  }
+
+  if (options.target === 'claude' || options.target === 'both') {
+    if (!options.claudeBinary && !dryRun) throw new Error('Claude Code CLI not found; pass --claude-binary with the real executable')
+    await installClaudeWrapper(binary, dryRun, platform, false)
   }
 
   if (options.target === 'codex' || options.target === 'both') {

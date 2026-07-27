@@ -3,15 +3,22 @@ import { codexLaunchArgv } from '../src/codex-launcher.js'
 
 describe('Codex remote launcher', () => {
   test('forwards the invoking workspace to the managed App Server', () => {
-    expect(codexLaunchArgv('codex', 47323, 'C:\\Dev\\KIP-AI', [])).toEqual([
+    expect(codexLaunchArgv('codex', 47323, 'C:\\Dev\\KIP-AI', [], true)).toEqual([
       'codex', '--remote', 'ws://127.0.0.1:47323', '-C', 'C:\\Dev\\KIP-AI',
     ])
   })
 
   test('preserves an explicit cwd and bypasses administrative subcommands', () => {
-    expect(codexLaunchArgv('codex', 47323, '/work/default', ['-C', '/work/other']))
+    expect(codexLaunchArgv('codex', 47323, '/work/default', ['-C', '/work/other'], true))
       .toEqual(['codex', '--remote', 'ws://127.0.0.1:47323', '-C', '/work/other'])
-    expect(codexLaunchArgv('codex', 47323, '/work/default', ['login']))
+    expect(codexLaunchArgv('codex', 47323, '/work/default', ['login'], true))
       .toEqual(['codex', 'login'])
+    expect(codexLaunchArgv('codex', 47323, '/work/default', ['--version'], true))
+      .toEqual(['codex', '--version'])
+  })
+
+  test('does not route non-interactive Codex invocations', () => {
+    expect(codexLaunchArgv('codex', 47323, '/work/default', ['exec', 'task'], false))
+      .toEqual(['codex', 'exec', 'task'])
   })
 })

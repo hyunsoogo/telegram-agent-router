@@ -9,6 +9,7 @@ export type RouterConfig = {
   port: number
   secret: string
   appServerPort?: number
+  claudeBinary?: string
   codexBinary?: string
 }
 
@@ -65,6 +66,7 @@ export function loadConfig(paths = statePaths()): RouterConfig {
     port: parsed.port!,
     secret: parsed.secret,
     ...(Number.isInteger(parsed.appServerPort) ? { appServerPort: parsed.appServerPort } : {}),
+    ...(parsed.claudeBinary ? { claudeBinary: parsed.claudeBinary } : {}),
     ...(parsed.codexBinary ? { codexBinary: parsed.codexBinary } : {}),
   }
 }
@@ -86,6 +88,7 @@ export function configureState(options: {
   host?: string
   port?: number
   appServerPort?: number
+  claudeBinary?: string
   codexBinary?: string
 }): StatePaths {
   const paths = ensureStateDir(statePaths(options.profile))
@@ -97,6 +100,9 @@ export function configureState(options: {
     host: options.host ?? existing.host ?? '127.0.0.1',
     port: options.port ?? existing.port ?? DEFAULT_PORTS[paths.profile],
     secret: existing.secret ?? randomBytes(32).toString('base64url'),
+    ...(paths.profile === 'claude' && (options.claudeBinary ?? existing.claudeBinary)
+      ? { claudeBinary: resolve(options.claudeBinary ?? existing.claudeBinary!) }
+      : {}),
     ...(paths.profile === 'codex'
       ? {
           appServerPort: options.appServerPort ?? existing.appServerPort ?? 47323,

@@ -131,7 +131,19 @@ async function installMacos(options: AutostartOptions): Promise<void> {
     if (!options.dryRun) writeManagedFile(path, launchAgentPlist(options.binaryPath, profile), 0o600)
     else process.stdout.write(`write ${path}\n`)
     await run(['launchctl', 'bootout', `${domain}/${label}`], Boolean(options.dryRun), true)
-    await run(['launchctl', 'bootstrap', domain, path], Boolean(options.dryRun))
+    let bootstrap: CommandResult | undefined
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      bootstrap = await run(
+        ['launchctl', 'bootstrap', domain, path],
+        Boolean(options.dryRun),
+        true,
+      )
+      if (options.dryRun || bootstrap.code === 0) break
+      await Bun.sleep(250)
+    }
+    if (!bootstrap || bootstrap.code !== 0) {
+      throw new Error(`launchctl bootstrap failed: ${bootstrap?.stderr.trim() || bootstrap?.stdout.trim() || 'unknown error'}`)
+    }
     await run(['launchctl', 'enable', `${domain}/${label}`], Boolean(options.dryRun))
     await run(['launchctl', 'kickstart', '-k', `${domain}/${label}`], Boolean(options.dryRun))
   }

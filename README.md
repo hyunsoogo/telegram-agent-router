@@ -108,9 +108,19 @@ This command:
 
 1. creates isolated `claude` and `codex` profile state;
 2. registers one dynamic, user-scoped Claude MCP server;
-3. installs the `codex` launch wrapper and records the real Codex binary;
+3. installs `claude` and `codex` launch wrappers, recording both real binaries;
+   the Claude wrapper automatically enables the `server:telegram-router`
+   development channel;
 4. registers and starts both router services; and
 5. enables restart after reboot/login.
+
+Claude Code currently classifies custom channels as a research-preview feature.
+The wrapper supplies the required
+`--dangerously-load-development-channels server:telegram-router` option, but
+Claude Code itself asks you to confirm local-development use once whenever a
+new interactive Claude session starts. Codex sessions do not require a similar
+confirmation. Explicit `--channels` or
+`--dangerously-load-development-channels` arguments are left unchanged.
 
 Use `--no-autostart` only when service registration is not wanted. Use
 `--dry-run --binary <compiled-router-path>` to inspect every generated action.
@@ -133,9 +143,9 @@ Pull and rebuild for the current platform, then run the same compiled
 route history are preserved; the versioned executable, wrappers, MCP
 registration, and automatic-start entries are replaced.
 
-The installer resolves a `codex` symlink to its real executable before replacing
-the link with the managed wrapper. It refuses to overwrite an unrecognized
-regular file at the wrapper path.
+The installer resolves `claude` and `codex` symlinks to their real executables
+before replacing the links with managed wrappers. It refuses to overwrite an
+unrecognized regular file at either wrapper path.
 
 ## Automatic start
 
