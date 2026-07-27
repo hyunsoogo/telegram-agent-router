@@ -6,7 +6,19 @@ describe('cross-platform automatic start definitions', () => {
     const command = windowsRunCommand('C:\\Tools\\router.exe', 'codex')
     expect(command).toContain('HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run')
     expect(command).toContain('TelegramAgentRouter-codex')
+    expect(command.join(' ')).toContain('powershell.exe')
+    expect(command.join(' ')).toContain('-WindowStyle Hidden')
+    expect(command.join(' ')).toContain('Start-Process -WindowStyle Hidden')
     expect(command.join(' ')).toContain('daemon --profile codex')
+  })
+
+  test('Windows safely quotes apostrophes in the installed binary path', () => {
+    const command = windowsRunCommand("C:\\Program Files\\O'Brien\\router.exe", 'claude')
+    expect(command.at(-2)).toBe(
+      "powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command " +
+      "\"Start-Process -WindowStyle Hidden -FilePath 'C:\\Program Files\\O''Brien\\router.exe' " +
+      "-ArgumentList 'daemon --profile claude'\"",
+    )
   })
 
   test('macOS LaunchAgent keeps each profile alive', () => {

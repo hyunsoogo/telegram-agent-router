@@ -45,7 +45,16 @@ function xml(value: string): string {
 }
 
 export function windowsRunCommand(binaryPath: string, profile: RouterProfile): string[] {
-  const action = `"${binaryPath.replaceAll('"', '""')}" daemon --profile ${profile}`
+  const escapedBinary = binaryPath.replaceAll("'", "''")
+  const action = [
+    'powershell.exe',
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-WindowStyle Hidden',
+    '-Command',
+    `"Start-Process -WindowStyle Hidden -FilePath '${escapedBinary}' -ArgumentList 'daemon --profile ${profile}'"`,
+  ].join(' ')
   return [
     'reg.exe',
     'ADD',
