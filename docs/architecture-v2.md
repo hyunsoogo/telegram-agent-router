@@ -63,9 +63,10 @@ Claude bot token                         Codex bot token
 ```
 
 Tokens are read only by their profile daemon. Claude MCP bridges receive a
-loopback URL and profile secret. Codex clients receive a single-use proxy URL;
-the router forwards that connection to the managed App Server and tracks the
-root thread chosen on that exact socket. Neither receives a Telegram token.
+loopback URL and profile secret. Codex clients receive a host-and-port-only
+single-use proxy URL; the router forwards that connection to the managed App
+Server and tracks the root thread chosen on that exact socket. Neither receives
+a Telegram token.
 
 ## Session model
 
@@ -149,10 +150,10 @@ no fixed session name, so every Claude process registers dynamically.
 
 Installation also places a thin `codex` wrapper before the real executable on
 the user's path. It preserves arguments and working directory, ensures the
-Codex profile daemon is healthy, requests a short-lived single-use client
-ticket, and invokes the real binary with the router proxy's `--remote` URL. The
-resolved real Codex path is stored at install time to prevent wrapper
-recursion.
+Codex profile daemon is healthy, requests a short-lived single-use loopback
+port, and invokes the real binary with the router proxy's host-and-port-only
+`--remote` URL. The resolved real Codex path is stored at install time to
+prevent wrapper recursion.
 
 Explicit commands remain available for diagnostics:
 

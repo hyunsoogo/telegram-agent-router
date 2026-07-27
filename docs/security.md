@@ -13,8 +13,8 @@
 
 The daemon binds to `127.0.0.1` by default. Bridge and health endpoints require
 a random secret stored with mode `0600` where supported. Codex launchers use the
-secret once to obtain a 30-second, single-use proxy ticket; the long-lived CLI
-command line contains only that ticket, not the profile secret.
+secret once to open a 30-second, single-use loopback proxy port; the long-lived
+CLI command line contains neither the profile secret nor an authenticated URL.
 
 ### One daemon
 

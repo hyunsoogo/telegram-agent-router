@@ -58,7 +58,8 @@ If exactly one visible session is online, the daemon may select it automatically
 
 - Bind only to `127.0.0.1` by default.
 - Authenticate Claude MCP bridges with a random router secret stored in the state directory.
-- Admit Codex client proxies with short-lived, single-use registration tickets.
+- Admit Codex client proxies through short-lived, single-use loopback ports
+  issued by an authenticated registration endpoint.
 - Store the Telegram token separately from SQLite.
 - Require terminal-side approval for pairing. A Telegram message cannot approve itself.
 - Do not broadcast inbound messages to every session.

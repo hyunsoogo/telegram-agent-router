@@ -214,7 +214,7 @@ separately selectable.
 
 The installed Codex wrapper preserves the working directory and arguments,
 ensures the Codex router is healthy, and runs the real CLI through a
-single-use authenticated router proxy to the managed App Server:
+single-use, loopback-only router proxy to the managed App Server:
 
 ```text
 codex --remote ws://127.0.0.1:<profile-port> ...

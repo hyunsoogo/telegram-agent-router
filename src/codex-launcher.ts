@@ -42,6 +42,27 @@ export function codexLaunchArgv(
   ]
 }
 
+export function validateCodexClientUrl(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('Codex router returned an invalid client URL')
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error('Codex router returned an invalid client URL')
+  }
+  if (
+    url.protocol !== 'ws:'
+    || url.hostname !== '127.0.0.1'
+    || !url.port
+    || url.pathname !== '/'
+    || url.search
+    || url.hash
+  ) {
+    throw new Error('Codex router returned an invalid client URL')
+  }
+  return value
+}
+
 async function codexClientUrl(config: RouterConfig): Promise<string> {
   const url = new URL(`http://${config.host}:${config.port}/codex-client/register`)
   const response = await fetch(url, {
@@ -51,10 +72,7 @@ async function codexClientUrl(config: RouterConfig): Promise<string> {
   })
   if (!response.ok) throw new Error(`Codex client registration failed with HTTP ${response.status}`)
   const result = await response.json() as { url?: unknown }
-  if (typeof result.url !== 'string' || !result.url.startsWith('ws://127.0.0.1:')) {
-    throw new Error('Codex router returned an invalid client URL')
-  }
-  return result.url
+  return validateCodexClientUrl(result.url)
 }
 
 export async function launchCodex(
