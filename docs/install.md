@@ -4,86 +4,100 @@
 
 Only the platform executable is required. Do not install Node.js, Bun, npm packages, grammY, SQLite, or the MCP SDK on the target machine.
 
-## 1. Configure
+## 1. Install both profiles
 
-Prefer an environment variable so the Telegram token does not appear in process listings or shell history.
+Run the platform executable. The installer securely prompts for separate Claude
+and Codex BotFather tokens, creates isolated profile state, installs launch
+wrappers, registers the Claude MCP bridge, and enables automatic start.
 
 ```bash
-TELEGRAM_BOT_TOKEN="..." ./telegram-agent-router configure
+./telegram-agent-router install --client both
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:TELEGRAM_BOT_TOKEN = "..."
-.\telegram-agent-router.exe configure
-Remove-Item Env:TELEGRAM_BOT_TOKEN
+.\telegram-agent-router-windows-x64.exe install --client both
 ```
 
-State defaults to `~/.telegram-agent-router/`:
+For unattended installation, set `TELEGRAM_BOT_TOKEN_CLAUDE` and
+`TELEGRAM_BOT_TOKEN_CODEX` only for the install command. To inspect generated
+actions without changing the machine, add `--dry-run`.
 
-- `.env`: Telegram bot token
-- `config.json`: loopback host, port, random bridge secret
-- `router.db`: allowlist, session grants, selected routes, metadata-only audit events
-- `daemon.pid`: single-daemon ownership
+State is isolated by profile:
 
-Override the directory with `TELEGRAM_AGENT_ROUTER_HOME`.
+```text
+~/.telegram-agent-router/
+├── claude/
+│   ├── .env
+│   ├── config.json
+│   ├── router.sqlite
+│   └── daemon.pid
+└── codex/
+    ├── .env
+    ├── config.json
+    ├── router.sqlite
+    └── daemon.pid
+```
 
-## 2. Start the daemon
+Override the root directory with `TELEGRAM_AGENT_ROUTER_HOME`.
+
+## 2. Client transport and automatic start
+
+Claude and Codex intentionally use different transports:
+
+- Claude registers one dynamic user-scoped MCP bridge. Each interactive Claude
+  process gets its own routable session.
+- Codex does not use MCP. Its managed wrapper preserves the working directory
+  and connects the real CLI to the supervised Codex App Server WebSocket.
+
+Automatic start is enabled by default:
+
+- Windows: per-user Run entries launch hidden PowerShell processes at logon;
+- macOS: per-user LaunchAgents are loaded immediately; and
+- Linux: `systemd --user` services are enabled, with linger configured for
+  headless hosts when permitted.
+
+Use `--no-autostart` only when service registration is not wanted. A second
+daemon for the same profile fails without terminating the live owner.
+
+The two profile daemons are the automatic-start processes. Claude's MCP bridge
+starts only when an interactive Claude session opens. The Codex profile daemon
+starts and supervises the shared App Server; Codex CLI clients attach when
+launched.
+
+Tokens may also be configured separately before installation:
+
+```text
+telegram-agent-router configure --profile claude
+telegram-agent-router configure --profile codex
+telegram-agent-router install --client both
+```
+
+## 3. Pair Telegram
+
+DM either bot. It returns a six-character code. Approve it against the matching
+profile from the local terminal:
 
 ```bash
-./telegram-agent-router daemon
+./telegram-agent-router access pair ABC123 --profile codex
 ```
 
-Only one daemon can own a state directory. A second daemon fails without terminating the first.
-
-## 3. Register AI clients
-
-Both clients:
+Pairing grants profile access by default. Optional session-specific grants are
+available during manual allowlisting:
 
 ```bash
-./telegram-agent-router install --client both --session project-a --label "Project A"
+./telegram-agent-router access allow 123456789 --profile claude
+./telegram-agent-router access grant 123456789 <session-id> --profile claude
 ```
 
-Claude Code only:
+## 4. Diagnose
 
 ```bash
-./telegram-agent-router install --client claude --session project-a --scope user
+./telegram-agent-router doctor --profile all
 ```
 
-Codex CLI only:
-
-```bash
-./telegram-agent-router install --client codex --session project-a
-```
-
-Inspect commands without changing client configuration:
-
-```bash
-./telegram-agent-router install --client both --session project-a --dry-run
-```
-
-The generated MCP command launches the same executable in `mcp` mode. No package manager command appears in client configuration.
-
-## 4. Pair Telegram
-
-DM the bot. It returns a six-character code. Approve from the local terminal:
-
-```bash
-./telegram-agent-router access pair ABC123
-```
-
-Pairing grants all sessions by default for single-user installations. Restrict a user during manual allowlisting:
-
-```bash
-./telegram-agent-router access allow 123456789 --session project-a
-./telegram-agent-router access grant 123456789 project-b
-```
-
-## 5. Diagnose
-
-```bash
-./telegram-agent-router doctor
-```
-
-The command checks configuration, token presence, SQLite, installed Claude/Codex CLIs, and the authenticated loopback health endpoint.
+The command checks profile configuration, token presence, SQLite, installed
+Claude/Codex CLIs, and the authenticated loopback health endpoints. The Codex
+App Server child does not inherit daemon stdout or stderr, so conversation and
+tool output is not mirrored into an automatic-start console.

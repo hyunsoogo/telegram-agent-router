@@ -150,7 +150,9 @@ unrecognized regular file at either wrapper path.
 ## Automatic start
 
 - Windows: per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-  entries at logon. Starting Claude/Codex also self-heals a stopped daemon.
+  entries at logon. Each entry launches its daemon through a hidden PowerShell
+  process, so no terminal window remains open. Starting Claude/Codex also
+  self-heals a stopped daemon.
 - macOS: per-user LaunchAgents, loaded immediately.
 - Linux: enabled `systemd --user` services.
 - Headless Linux server: the installer checks and enables user linger. If the
@@ -159,6 +161,11 @@ unrecognized regular file at either wrapper path.
 
 Profiles are independent. A revoked Claude token or failed Claude service does
 not stop the Codex bot, and vice versa.
+
+The two profile daemons are the automatic-start entries. Claude's MCP bridge is
+not a separate persistent service; Claude starts one bridge for each interactive
+session. The Codex profile daemon starts and supervises the shared Codex App
+Server, while individual Codex clients connect only when launched.
 
 ## Pairing and use
 
@@ -218,6 +225,11 @@ answer is sent back to the Telegram chat that supplied the turn. Privileged
 approval and structured-input prompts are not auto-approved; use the attached
 terminal for those interactions.
 
+The managed App Server process does not inherit the router's standard output or
+error streams, so conversation and tool output is not mirrored into an
+automatic-start console. A router started manually in the foreground may still
+write operational errors and session metadata to its own standard error stream.
+
 ## Diagnostics
 
 ```text
@@ -234,8 +246,10 @@ State:
 ```
 
 Local control ports bind to `127.0.0.1` only. See
-[`docs/architecture-v2.md`](docs/architecture-v2.md) for lifecycle, failure
-handling, and security boundaries.
+[`docs/install.md`](docs/install.md) for standalone setup,
+[`docs/architecture.md`](docs/architecture.md) for the compact component model,
+[`docs/architecture-v2.md`](docs/architecture-v2.md) for lifecycle and failure
+handling, and [`docs/security.md`](docs/security.md) for trust boundaries.
 
 ## Development
 

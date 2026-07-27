@@ -32,12 +32,12 @@ Each profile owns its token, database, lock, configuration, and local port:
 │   ├── config.json
 │   ├── .env
 │   ├── router.sqlite
-│   └── router.pid
+│   └── daemon.pid
 └── codex/
     ├── config.json
     ├── .env
     ├── router.sqlite
-    └── router.pid
+    └── daemon.pid
 ```
 
 Default loopback ports are 47321 for Claude, 47322 for the Codex router, and
@@ -62,8 +62,9 @@ Claude bot token                         Codex bot token
                                  (--remote clients)
 ```
 
-Tokens are read only by their profile daemon. MCP bridges and Codex clients
-receive a loopback URL and profile secret, never a Telegram token.
+Tokens are read only by their profile daemon. Claude MCP bridges receive a
+loopback URL and profile secret; Codex clients receive the managed App Server
+loopback URL. Neither receives a Telegram token.
 
 ## Session model
 
@@ -163,7 +164,7 @@ default. `--no-autostart` is the opt-out.
 
 | Host | Registration | Reboot behavior |
 | --- | --- | --- |
-| Windows | Per-user HKCU Run entries | Starts after user logon; agent launch self-heals |
+| Windows | Per-user HKCU Run entries launching hidden PowerShell processes | Starts after user logon without a visible terminal; agent launch self-heals |
 | macOS | `~/Library/LaunchAgents` | Starts at login and is loaded immediately |
 | Linux desktop/server | `systemd --user` | Enabled immediately |
 | Headless Linux server | `systemd --user` plus linger | Starts at boot without an interactive login |
@@ -213,6 +214,11 @@ Expected failure behavior:
 - ambiguous `/use` selector: no route changes; matching sessions are listed;
 - service registration failure: install exits non-zero and preserves generated
   files for inspection.
+
+The managed Codex App Server does not inherit the daemon's stdout or stderr, so
+conversation and tool streams are not copied into an automatic-start console.
+A manually foregrounded router can still emit operational errors and session
+metadata on its own stderr.
 
 ## Security boundaries
 
