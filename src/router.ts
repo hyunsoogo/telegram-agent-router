@@ -10,6 +10,7 @@ import { SessionRegistry } from './session-registry.js'
 import { acquireDaemonLock } from './lock.js'
 import { RouterStore } from './store.js'
 import { VERSION } from './version.js'
+import { DaemonDiagnostics, diagnosticError } from './diagnostics.js'
 
 type SocketData = {
   sessionId?: string
@@ -113,7 +114,10 @@ async function requireAllowed(ctx: Context, store: RouterStore): Promise<{ userI
   return null
 }
 
-async function runOwnedDaemon(paths: ReturnType<typeof statePaths>): Promise<void> {
+async function runOwnedDaemon(
+  paths: ReturnType<typeof statePaths>,
+  diagnostics?: DaemonDiagnostics,
+): Promise<void> {
   const config = loadConfig(paths)
   const token = loadBotToken(paths)
   const store = new RouterStore(paths.database, paths.profile)
@@ -145,7 +149,7 @@ async function runOwnedDaemon(paths: ReturnType<typeof statePaths>): Promise<voi
           }
           rememberBotMessage(output.chatId, String(sent.message_id), output.sessionId)
         }
-      })
+      }, (event, details) => diagnostics?.log(event, details))
     : null
   if (codex) {
     try {
@@ -564,37 +568,46 @@ async function runOwnedDaemon(paths: ReturnType<typeof statePaths>): Promise<voi
     for (const proxy of codexClientProxies) proxy.stop(true)
     codexClientProxies.clear()
   }
-  const stop = () => {
+  const stop = (reason: 'SIGINT' | 'SIGTERM') => {
     if (stopping) return
     stopping = true
+    diagnostics?.log('daemon_shutdown_requested', { reason })
     process.stderr.write('telegram-agent-router: shutting down\n')
     stopCodexClientProxies()
     server.stop(true)
-    void codex?.stop()
-    store.close()
     void bot.stop()
   }
-  process.on('SIGINT', stop)
-  process.on('SIGTERM', stop)
+  const onSigint = () => stop('SIGINT')
+  const onSigterm = () => stop('SIGTERM')
+  process.on('SIGINT', onSigint)
+  process.on('SIGTERM', onSigterm)
 
   process.stderr.write(`telegram-agent-router[${paths.profile}]: local bridge ws://${config.host}:${config.port}/bridge\n`)
   try {
     await bot.start({ onStart: info => { process.stderr.write(`telegram-agent-router: polling as @${info.username}\n`) } })
   } finally {
+    process.off('SIGINT', onSigint)
+    process.off('SIGTERM', onSigterm)
     if (!stopping) {
       stopping = true
       stopCodexClientProxies()
       server.stop(true)
-      await codex?.stop()
-      store.close()
     }
+    await codex?.stop()
+    store.close()
   }
 }
 export async function runDaemon(profile: RouterProfile = 'codex'): Promise<void> {
   const paths = statePaths(profile)
   const release = acquireDaemonLock(paths.pid)
+  const diagnostics = profile === 'codex' ? new DaemonDiagnostics(paths, VERSION) : undefined
+  diagnostics?.start()
   try {
-    await runOwnedDaemon(paths)
+    await runOwnedDaemon(paths, diagnostics)
+    diagnostics?.finish('stopped')
+  } catch (error) {
+    diagnostics?.finish('failed', { error: diagnosticError(error) })
+    throw error
   } finally {
     release()
   }

@@ -3,12 +3,13 @@ import {
   CODEX_APP_SERVER_STDIO,
   CodexAppServer,
   codexTelegramInputText,
+  readStderrTail,
   spawnCodexAppServer,
 } from '../src/codex-app-server.js'
 import type { CodexThread } from '../src/codex-client-observer.js'
 
 describe('Codex Telegram input formatting', () => {
-  test('does not inherit App Server output that may contain conversation content', () => {
+  test('captures only App Server stderr for bounded diagnostics', () => {
     let spawnedArgv: string[] | undefined
     let spawnedOptions: typeof CODEX_APP_SERVER_STDIO | undefined
     const process = {} as ReturnType<typeof Bun.spawn>
@@ -23,8 +24,20 @@ describe('Codex Telegram input formatting', () => {
     expect(spawnedOptions).toEqual({
       stdin: 'ignore',
       stdout: 'ignore',
-      stderr: 'ignore',
+      stderr: 'pipe',
     })
+  })
+
+  test('keeps only the configured tail while draining stderr', async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('discard-this-'))
+        controller.enqueue(new TextEncoder().encode('keep-this'))
+        controller.close()
+      },
+    })
+
+    expect(await readStderrTail(stream, 9)).toBe('keep-this')
   })
 
   test('wraps Telegram content with source metadata', () => {

@@ -239,9 +239,11 @@ turn. Privileged approval and structured-input prompts are not auto-approved;
 use the attached terminal for those interactions.
 
 The managed App Server process does not inherit the router's standard output or
-error streams, so conversation and tool output is not mirrored into an
-automatic-start console. A router started manually in the foreground may still
-write operational errors and session metadata to its own standard error stream.
+standard output, so conversation and tool output is not mirrored into an
+automatic-start console. Its standard error is retained only as a bounded,
+redacted tail for crash diagnostics. A router started manually in the foreground
+may still write operational errors and session metadata to its own standard
+error stream.
 
 ## Diagnostics
 
@@ -250,6 +252,26 @@ telegram-agent-router doctor --profile all
 telegram-agent-router doctor --profile claude
 telegram-agent-router doctor --profile codex
 ```
+
+Crash and lifecycle events are written as JSON Lines:
+
+```text
+~/.telegram-agent-router/codex/diagnostics.jsonl
+~/.telegram-agent-router/codex/daemon-state.json
+```
+
+On PowerShell, inspect the latest events with:
+
+```powershell
+Get-Content "$HOME/.telegram-agent-router/codex/diagnostics.jsonl" -Tail 50
+```
+
+The log records graceful shutdown signals, router startup failures, App Server
+PID/exit code/signal/uptime, reconnect attempts, and up to the last 64 KiB of
+App Server standard error. A heartbeat state file lets the next launch report
+`unclean_shutdown_detected` after a process kill, machine restart, or similar
+termination where no shutdown hook ran. Credentials and Telegram channel bodies
+are redacted. Logs rotate at 5 MiB with one backup file.
 
 State:
 

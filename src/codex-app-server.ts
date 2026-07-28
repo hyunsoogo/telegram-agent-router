@@ -3,6 +3,7 @@ import type { RouterConfig } from './paths.js'
 import type { InboundEvent, SessionDescriptor } from './protocol.js'
 import { VERSION } from './version.js'
 import type { CodexThread, CodexThreadStatus } from './codex-client-observer.js'
+import { MAX_STDERR_TAIL_BYTES } from './diagnostics.js'
 
 type JsonRpcId = number | string
 
@@ -28,7 +29,7 @@ export type CodexOutput = {
 export const CODEX_APP_SERVER_STDIO = {
   stdin: 'ignore',
   stdout: 'ignore',
-  stderr: 'ignore',
+  stderr: 'pipe',
 } as const
 
 type CodexAppServerProcess = ReturnType<typeof Bun.spawn>
@@ -43,6 +44,35 @@ export function spawnCodexAppServer(
   spawn: CodexAppServerSpawner = Bun.spawn,
 ): CodexAppServerProcess {
   return spawn([binary, 'app-server', '--listen', url], CODEX_APP_SERVER_STDIO)
+}
+
+export async function readStderrTail(
+  stream: ReadableStream<Uint8Array> | number | null | undefined,
+  maxBytes = MAX_STDERR_TAIL_BYTES,
+): Promise<string> {
+  if (!stream || typeof stream === 'number') return ''
+  const limit = Math.max(0, maxBytes)
+  const reader = stream.getReader()
+  let tail = new Uint8Array(0)
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value || limit === 0) continue
+      if (value.byteLength >= limit) {
+        tail = value.slice(value.byteLength - limit)
+        continue
+      }
+      const retained = Math.min(tail.byteLength, limit - value.byteLength)
+      const next = new Uint8Array(retained + value.byteLength)
+      next.set(tail.slice(tail.byteLength - retained))
+      next.set(value, retained)
+      tail = next
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  return new TextDecoder().decode(tail).trim()
 }
 
 function channelAttribute(value: string): string {
@@ -97,6 +127,7 @@ export class CodexAppServer {
   constructor(
     private readonly config: RouterConfig,
     private readonly onOutput: (output: CodexOutput) => Promise<void>,
+    private readonly onDiagnostic: (event: string, details?: Record<string, unknown>) => void = () => {},
   ) {}
 
   async start(): Promise<void> {
@@ -234,8 +265,26 @@ export class CodexAppServer {
     if (!this.process || this.process.exitCode !== null) {
       const binary = this.config.codexBinary ?? Bun.which('codex')
       if (!binary) throw new Error('Codex CLI not found; configure the codex profile with --codex-binary')
-      this.process = spawnCodexAppServer(binary, url)
-      void this.process.exited.then(code => {
+      const child = spawnCodexAppServer(binary, url)
+      const startedAt = Date.now()
+      const stderrTail = readStderrTail(child.stderr).catch(() => '')
+      this.process = child
+      this.diagnose('app_server_spawned', {
+        app_server_pid: child.pid,
+        app_server_port: this.config.appServerPort,
+        binary,
+      })
+      void child.exited.then(async code => {
+        this.diagnose('app_server_exited', {
+          app_server_pid: child.pid,
+          exit_code: code,
+          signal_code: child.signalCode,
+          killed: child.killed,
+          expected: this.stopped,
+          uptime_ms: Date.now() - startedAt,
+          tracked_sessions: this.threadClients.size,
+          stderr_tail: await stderrTail,
+        })
         if (!this.stopped) process.stderr.write(`telegram-agent-router[codex]: App Server exited with code ${code}\n`)
       })
     }
@@ -282,6 +331,11 @@ export class CodexAppServer {
       this.socket = null
       this.rejectPending(new Error('Codex App Server disconnected'))
       if (!this.stopped) {
+        this.diagnose('app_server_disconnected', {
+          app_server_pid: this.process?.pid,
+          app_server_exit_code: this.process?.exitCode,
+          tracked_sessions: this.threadClients.size,
+        })
         process.stderr.write('telegram-agent-router[codex]: App Server disconnected\n')
         void this.recover()
       }
@@ -488,6 +542,12 @@ export class CodexAppServer {
     }
   }
 
+  private diagnose(event: string, details: Record<string, unknown> = {}): void {
+    try {
+      this.onDiagnostic(event, details)
+    } catch {}
+  }
+
   private async recover(): Promise<void> {
     if (this.recovering || this.stopped) return
     this.recovering = true
@@ -501,10 +561,16 @@ export class CodexAppServer {
           await this.connectOrSpawn()
           await this.initialize()
           await this.refreshThreads()
+          this.diagnose('app_server_reconnected', { attempt })
           process.stderr.write('telegram-agent-router[codex]: App Server reconnected\n')
           return
         } catch (error) {
           const delay = Math.min(1000 * attempt, 10_000)
+          this.diagnose('app_server_recovery_failed', {
+            attempt,
+            retry_delay_ms: delay,
+            error: String(error),
+          })
           process.stderr.write(`telegram-agent-router[codex]: recovery failed: ${String(error)}; retrying in ${delay / 1000}s\n`)
           await Bun.sleep(delay)
         }
