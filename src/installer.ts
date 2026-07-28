@@ -246,6 +246,51 @@ async function installProgramBinary(
   return destination
 }
 
+export function windowsShimsDirectory(homeDirectory = homedir()): string {
+  return join(homeDirectory, '.telegram-agent-router', 'shims')
+}
+
+async function writeManagedWrapper(
+  path: string,
+  content: string,
+  client: WrapperClient,
+  platform: NodeJS.Platform,
+): Promise<void> {
+  const existing = lstatIfPresent(path)
+  if (existing && !existing.isSymbolicLink() && !isManagedWrapper(path, existing, client, platform)) {
+    const label = client === 'claude' ? 'Claude' : 'Codex'
+    throw new Error(`refusing to overwrite existing ${label} executable: ${path}; pass --${client}-binary with the real executable and move it outside the wrapper path`)
+  }
+  const suffix = `${process.pid}-${Date.now()}`
+  const replacement = `${path}.new-${suffix}`
+  const previous = `${path}.previous-${suffix}`
+  await Bun.write(replacement, content)
+  if (platform !== 'win32') {
+    try { chmodSync(replacement, 0o755) } catch {}
+  }
+  let previousMoved = false
+  try {
+    if (existing) {
+      renameSync(path, previous)
+      previousMoved = true
+    }
+    renameSync(replacement, path)
+    if (previousMoved) {
+      try { unlinkSync(previous) } catch {}
+    }
+  } catch (error) {
+    try {
+      if (previousMoved && !lstatIfPresent(path) && lstatIfPresent(previous)) {
+        renameSync(previous, path)
+      }
+    } catch {}
+    try {
+      if (lstatIfPresent(replacement)) unlinkSync(replacement)
+    } catch {}
+    throw error
+  }
+}
+
 async function installClientWrapper(
   client: WrapperClient,
   binaryPath: string,
@@ -256,49 +301,35 @@ async function installClientWrapper(
 ): Promise<string> {
   const directory = join(homeDirectory, '.local', 'bin')
   const path = join(directory, platform === 'win32' ? `${client}.cmd` : client)
+  const content = client === 'claude'
+    ? claudeWrapperContent(binaryPath, platform)
+    : codexWrapperContent(binaryPath, platform)
   process.stdout.write(`write ${path}\n`)
   if (!dryRun) {
     mkdirSync(directory, { recursive: true })
-    const existing = lstatIfPresent(path)
-    if (existing && !existing.isSymbolicLink() && !isManagedWrapper(path, existing, client, platform)) {
-      const label = client === 'claude' ? 'Claude' : 'Codex'
-      throw new Error(`refusing to overwrite existing ${label} executable: ${path}; pass --${client}-binary with the real executable and move it outside the wrapper path`)
+    await writeManagedWrapper(path, content, client, platform)
+  }
+  if (platform === 'win32') {
+    // PATHEXT ranks .exe above .cmd inside one directory, so a native
+    // ${client}.exe in ~/.local/bin (e.g. the native Claude Code installer)
+    // permanently shadows the .cmd wrapper. A duplicate wrapper in a shim
+    // directory that sits earlier on PATH wins regardless of PATHEXT.
+    const shimPath = join(windowsShimsDirectory(homeDirectory), `${client}.cmd`)
+    process.stdout.write(`write ${shimPath}\n`)
+    const nativeExecutable = join(directory, `${client}.exe`)
+    if (existsSync(nativeExecutable)) {
+      process.stdout.write(`note: ${nativeExecutable} shadows ${basename(path)} through PATHEXT; the shim directory takes precedence on PATH\n`)
     }
-    const suffix = `${process.pid}-${Date.now()}`
-    const replacement = `${path}.new-${suffix}`
-    const previous = `${path}.previous-${suffix}`
-    const content = client === 'claude'
-      ? claudeWrapperContent(binaryPath, platform)
-      : codexWrapperContent(binaryPath, platform)
-    await Bun.write(replacement, content)
-    if (platform !== 'win32') {
-      try { chmodSync(replacement, 0o755) } catch {}
-    }
-    let previousMoved = false
-    try {
-      if (existing) {
-        renameSync(path, previous)
-        previousMoved = true
-      }
-      renameSync(replacement, path)
-      if (previousMoved) {
-        try { unlinkSync(previous) } catch {}
-      }
-    } catch (error) {
-      try {
-        if (previousMoved && !lstatIfPresent(path) && lstatIfPresent(previous)) {
-          renameSync(previous, path)
-        }
-      } catch {}
-      try {
-        if (lstatIfPresent(replacement)) unlinkSync(replacement)
-      } catch {}
-      throw error
+    if (!dryRun) {
+      mkdirSync(windowsShimsDirectory(homeDirectory), { recursive: true })
+      await writeManagedWrapper(shimPath, content, client, platform)
     }
   }
   if (managePath) {
-    if (platform === 'win32') await prependWindowsUserPath(directory, dryRun)
-    else prependPosixPath(directory, platform, dryRun)
+    if (platform === 'win32') {
+      await prependWindowsUserPath(directory, dryRun)
+      await prependWindowsUserPath(windowsShimsDirectory(homeDirectory), dryRun)
+    } else prependPosixPath(directory, platform, dryRun)
   }
   return path
 }
@@ -311,6 +342,28 @@ export function installClaudeWrapper(
   homeDirectory = homedir(),
 ): Promise<string> {
   return installClientWrapper('claude', binaryPath, dryRun, platform, managePath, homeDirectory)
+}
+
+export type WindowsCommandResolution = { path: string; managed: boolean }
+
+export function resolveWindowsCommand(
+  client: WrapperClient,
+  environmentPath = process.env.PATH ?? '',
+  pathExtensions = process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD',
+  platform: NodeJS.Platform = process.platform,
+): WindowsCommandResolution | undefined {
+  const extensions = pathExtensions.split(';').filter(Boolean)
+  for (const rawDirectory of environmentPath.split(';')) {
+    const directory = rawDirectory.trim().replaceAll('"', '')
+    if (!directory) continue
+    for (const extension of extensions) {
+      const candidate = join(directory, `${client}${extension.toLowerCase()}`)
+      const stats = lstatIfPresent(candidate)
+      if (!stats?.isFile()) continue
+      return { path: candidate, managed: isManagedWrapper(candidate, stats, client, platform) }
+    }
+  }
+  return undefined
 }
 
 export function installCodexWrapper(
@@ -419,6 +472,10 @@ export async function installClients(options: InstallOptions, dryRun: boolean): 
   if (options.target === 'codex' || options.target === 'both') {
     await installCodexWrapper(binary, dryRun, platform, false)
   }
+
+  // installProgramBinary already prepended ~/.local/bin; prepending the shim
+  // directory afterwards keeps it in front, so shims beat PATHEXT shadowing.
+  if (platform === 'win32') await prependWindowsUserPath(windowsShimsDirectory(), dryRun)
 
   if (options.autostart !== false) {
     await installAutostart({

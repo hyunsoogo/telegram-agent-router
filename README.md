@@ -147,6 +147,17 @@ The installer resolves `claude` and `codex` symlinks to their real executables
 before replacing the links with managed wrappers. It refuses to overwrite an
 unrecognized regular file at either wrapper path.
 
+On Windows the wrappers are `.cmd` files, and `PATHEXT` ranks a native
+`claude.exe` or `codex.exe` in the same `~/.local/bin` directory above them, so
+a `.cmd` wrapper next to a native executable would never run. The installer
+therefore also writes each wrapper to `~/.telegram-agent-router/shims` and puts
+that directory first on the user `PATH`, which wins regardless of `PATHEXT` —
+including when a native executable appears later (for example a native Claude
+Code install after the router). `doctor` verifies that typing `claude` or
+`codex` actually reaches a managed wrapper and reports the shadowing path when
+it does not. Shell aliases and profile functions still take precedence over
+`PATH`; remove any that point at the native executable directly.
+
 ## Automatic start
 
 - Windows: per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`

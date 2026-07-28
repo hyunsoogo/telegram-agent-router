@@ -17,6 +17,7 @@ import {
   installClients,
   resolveClaudeBinaryPath,
   resolveCodexBinaryPath,
+  resolveWindowsCommand,
   type InstallTarget,
 } from './installer.js'
 import { RouterStore } from './store.js'
@@ -153,6 +154,18 @@ async function doctorProfile(profile: RouterProfile): Promise<Array<[string, boo
   }
   if (profile === 'claude') checks.push(['Claude Code CLI', Boolean(config?.claudeBinary ?? Bun.which('claude')), config?.claudeBinary ?? Bun.which('claude') ?? 'not found'])
   if (profile === 'codex') checks.push(['Codex CLI', Boolean(config?.codexBinary ?? Bun.which('codex')), config?.codexBinary ?? Bun.which('codex') ?? 'not found'])
+  if (process.platform === 'win32') {
+    const resolution = resolveWindowsCommand(profile)
+    checks.push([
+      `${profile} wrapper on PATH`,
+      Boolean(resolution?.managed),
+      !resolution
+        ? `${profile} not found on PATH; run install --client ${profile}`
+        : resolution.managed
+          ? resolution.path
+          : `${resolution.path} shadows the managed wrapper; rerun install --client ${profile}, then open a new terminal`,
+    ])
+  }
   return checks
 }
 

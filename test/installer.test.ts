@@ -8,6 +8,8 @@ import {
   printableCommand,
   resolveClaudeBinaryPath,
   resolveCodexBinaryPath,
+  resolveWindowsCommand,
+  windowsShimsDirectory,
 } from '../src/installer.js'
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -124,5 +126,54 @@ describe('standalone client installer', () => {
     await expect(installCodexWrapper('/opt/router', false, 'linux', false, home))
       .rejects.toThrow('refusing to overwrite existing Codex executable')
     expect(readFileSync(path, 'utf8')).toBe('original codex binary')
+  })
+})
+
+describe('windows PATHEXT shadowing', () => {
+  test('windows wrapper install also writes a shim wrapper that survives a native exe', async () => {
+    const home = temporaryHome()
+    const binDirectory = join(home, '.local', 'bin')
+    mkdirSync(binDirectory, { recursive: true })
+    writeFileSync(join(binDirectory, 'claude.exe'), 'native claude binary')
+
+    await installClaudeWrapper('C:\\router\\telegram-agent-router.exe', false, 'win32', false, home)
+
+    const wrapper = readFileSync(join(binDirectory, 'claude.cmd'), 'utf8')
+    const shim = readFileSync(join(windowsShimsDirectory(home), 'claude.cmd'), 'utf8')
+    expect(wrapper).toBe(claudeWrapperContent('C:\\router\\telegram-agent-router.exe', 'win32'))
+    expect(shim).toBe(wrapper)
+    expect(readFileSync(join(binDirectory, 'claude.exe'), 'utf8')).toBe('native claude binary')
+  })
+
+  test('codex wrapper install writes the windows shim as well', async () => {
+    const home = temporaryHome()
+
+    await installCodexWrapper('C:\\router\\telegram-agent-router.exe', false, 'win32', false, home)
+
+    expect(readFileSync(join(windowsShimsDirectory(home), 'codex.cmd'), 'utf8'))
+      .toBe(codexWrapperContent('C:\\router\\telegram-agent-router.exe', 'win32'))
+  })
+
+  test('resolveWindowsCommand follows PATH directory order before PATHEXT order', () => {
+    const home = temporaryHome()
+    const shims = join(home, 'shims')
+    const bin = join(home, 'bin')
+    mkdirSync(shims, { recursive: true })
+    mkdirSync(bin, { recursive: true })
+    const wrapper = claudeWrapperContent('C:\\router\\telegram-agent-router.exe', 'win32')
+    writeFileSync(join(bin, 'claude.exe'), 'native claude binary')
+    writeFileSync(join(bin, 'claude.cmd'), wrapper)
+    writeFileSync(join(shims, 'claude.cmd'), wrapper)
+    const pathExtensions = '.COM;.EXE;.BAT;.CMD'
+
+    const shadowed = resolveWindowsCommand('claude', `${bin};${shims}`, pathExtensions, 'win32')
+    expect(shadowed?.path).toBe(join(bin, 'claude.exe'))
+    expect(shadowed?.managed).toBe(false)
+
+    const shimmed = resolveWindowsCommand('claude', `${shims};${bin}`, pathExtensions, 'win32')
+    expect(shimmed?.path).toBe(join(shims, 'claude.cmd'))
+    expect(shimmed?.managed).toBe(true)
+
+    expect(resolveWindowsCommand('claude', '', pathExtensions, 'win32')).toBeUndefined()
   })
 })
