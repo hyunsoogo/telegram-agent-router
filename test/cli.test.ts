@@ -21,7 +21,7 @@ describe('CLI bootstrap', () => {
   test('--version prints the embedded version', async () => {
     const result = await run('--version')
     expect(result.code).toBe(0)
-    expect(result.stdout).toBe('0.2.10\n')
+    expect(result.stdout).toBe('0.2.11\n')
     expect(result.stderr).toBe('')
   })
 

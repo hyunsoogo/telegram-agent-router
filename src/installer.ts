@@ -36,6 +36,18 @@ export type InstallCommand = {
 
 type WrapperClient = 'claude' | 'codex'
 
+export type DaemonHealth = {
+  profile?: string
+  pid?: number
+  version?: string
+  sessions?: unknown[]
+}
+
+export class DaemonReplacementBlockedError extends Error {}
+
+type HealthProbe = () => Promise<DaemonHealth | undefined>
+type Delay = (milliseconds: number) => Promise<void>
+
 const WRAPPER_MARKERS: Record<WrapperClient, string> = {
   claude: 'telegram-agent-router managed Claude wrapper',
   codex: 'telegram-agent-router managed Codex wrapper',
@@ -383,59 +395,131 @@ function healthUrl(profile: RouterProfile): { url: URL; port: number } {
   return { url, port: config.port }
 }
 
+export function assertDaemonReplaceable(profile: RouterProfile, health: DaemonHealth): void {
+  if (profile !== 'claude') return
+  const activeSessions = Array.isArray(health.sessions) ? health.sessions.length : 0
+  if (activeSessions === 0) return
+  throw new DaemonReplacementBlockedError(
+    `cannot update claude while ${activeSessions} Claude bridge session${activeSessions === 1 ? ' is' : 's are'} still active; ` +
+    'fully exit Claude Code and retry the install',
+  )
+}
+
+export async function assertDaemonStayedStopped(
+  profile: RouterProfile,
+  port: number,
+  probe: HealthProbe,
+  delay: Delay = Bun.sleep,
+  attempts = 10,
+): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await delay(100)
+    const health = await probe()
+    if (health?.profile === profile) {
+      throw new DaemonReplacementBlockedError(
+        `${profile} daemon restarted during install on port ${port} as ${health.version ?? 'legacy'} ` +
+        `(pid ${health.pid ?? 'unknown'}); fully exit active ${profile === 'claude' ? 'Claude Code' : 'Codex'} sessions and retry`,
+      )
+    }
+  }
+}
+
+async function probeProfileHealth(profile: RouterProfile, timeout: number): Promise<DaemonHealth | undefined> {
+  const { url } = healthUrl(profile)
+  let response: Response
+  try {
+    response = await fetch(url, { signal: AbortSignal.timeout(timeout) })
+  } catch {
+    return undefined
+  }
+  if (!response.ok) return undefined
+  return await response.json() as DaemonHealth
+}
+
+async function assertWindowsDaemonStayedStopped(profile: RouterProfile): Promise<void> {
+  const { port } = healthUrl(profile)
+  await assertDaemonStayedStopped(
+    profile,
+    port,
+    () => probeProfileHealth(profile, 250),
+  )
+}
+
 async function stopExistingWindowsDaemon(profile: RouterProfile, dryRun: boolean): Promise<void> {
-  process.stdout.write(`stop existing ${profile} daemon if running\n`)
+  process.stdout.write(`check and stop existing ${profile} daemon if safe\n`)
   if (dryRun) return
   const paths = statePaths(profile)
   if (!existsSync(paths.config)) return
-  try {
-    const { url } = healthUrl(profile)
-    const response = await fetch(url, { signal: AbortSignal.timeout(750) })
-    if (!response.ok) return
-    const health = await response.json() as { profile?: string; pid?: number }
-    if (health.profile !== profile) return
-    let pid = Number.NaN
-    if (typeof health.pid === 'number' && Number.isSafeInteger(health.pid)) {
-      pid = health.pid
-    } else if (existsSync(paths.pid)) {
-      pid = Number.parseInt(readFileSync(paths.pid, 'utf8'), 10)
-    }
-    if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) return
-    process.kill(pid, 'SIGTERM')
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      try {
-        process.kill(pid, 0)
-        await Bun.sleep(100)
-      } catch {
-        return
-      }
-    }
-    throw new Error(`${profile} daemon pid ${pid} did not stop`)
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('did not stop')) throw error
+  const health = await probeProfileHealth(profile, 750)
+  if (health?.profile !== profile) return
+  assertDaemonReplaceable(profile, health)
+  let pid = Number.NaN
+  if (typeof health.pid === 'number' && Number.isSafeInteger(health.pid)) {
+    pid = health.pid
+  } else if (existsSync(paths.pid)) {
+    pid = Number.parseInt(readFileSync(paths.pid, 'utf8'), 10)
   }
+  if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) return
+  process.kill(pid, 'SIGTERM')
+  let stopped = false
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      process.kill(pid, 0)
+      await Bun.sleep(100)
+    } catch {
+      stopped = true
+      break
+    }
+  }
+  if (!stopped) throw new Error(`${profile} daemon pid ${pid} did not stop`)
+  await assertWindowsDaemonStayedStopped(profile)
+}
+
+export async function waitForStableProfileHealth(
+  profile: RouterProfile,
+  version: string,
+  port: number,
+  probe: HealthProbe,
+  delay: Delay = Bun.sleep,
+  attempts = 40,
+): Promise<void> {
+  let lastError: unknown
+  let healthyPid: number | undefined
+  let consecutiveHealthy = 0
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const health = await probe()
+      if (!health) throw new Error('health endpoint unavailable')
+      if (health.profile !== profile || health.version !== version) {
+        throw new Error(`port ${port} is running ${health.profile ?? 'unknown'} ${health.version ?? 'legacy'}, expected ${profile} ${version}`)
+      }
+      const pid = typeof health.pid === 'number' && Number.isSafeInteger(health.pid) && health.pid > 1
+        ? health.pid
+        : undefined
+      consecutiveHealthy = pid !== undefined && pid === healthyPid ? consecutiveHealthy + 1 : 1
+      healthyPid = pid
+      if (healthyPid !== undefined && consecutiveHealthy >= 2) return
+      lastError = new Error(`waiting for ${profile} ${version} pid ${health.pid ?? 'unknown'} to remain healthy`)
+    } catch (error) {
+      lastError = error
+      consecutiveHealthy = 0
+      healthyPid = undefined
+    }
+    await delay(250)
+  }
+  throw new Error(`${profile} service did not become healthy: ${String(lastError)}`)
 }
 
 async function verifyProfileHealth(profile: RouterProfile, dryRun: boolean): Promise<void> {
   process.stdout.write(`verify ${profile} profile health\n`)
   if (dryRun) return
-  const { url, port } = healthUrl(profile)
-  let lastError: unknown
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(750) })
-      if (response.ok) {
-        const health = await response.json() as { profile?: string; version?: string }
-        if (health.profile === profile && health.version === VERSION) return
-        throw new Error(`port ${port} is running ${health.profile ?? 'unknown'} ${health.version ?? 'legacy'}, expected ${profile} ${VERSION}`)
-      }
-      lastError = new Error(`HTTP ${response.status}`)
-    } catch (error) {
-      lastError = error
-    }
-    await Bun.sleep(250)
-  }
-  throw new Error(`${profile} service did not become healthy: ${String(lastError)}`)
+  const { port } = healthUrl(profile)
+  await waitForStableProfileHealth(
+    profile,
+    VERSION,
+    port,
+    () => probeProfileHealth(profile, 750),
+  )
 }
 
 export async function installClients(options: InstallOptions, dryRun: boolean): Promise<void> {

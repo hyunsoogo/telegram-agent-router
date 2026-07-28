@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import {
+  assertDaemonStayedStopped,
+  assertDaemonReplaceable,
   claudeWrapperContent,
   codexWrapperContent,
+  DaemonReplacementBlockedError,
   installationCommands,
   installClaudeWrapper,
   installCodexWrapper,
@@ -9,6 +12,7 @@ import {
   resolveClaudeBinaryPath,
   resolveCodexBinaryPath,
   resolveWindowsCommand,
+  waitForStableProfileHealth,
   windowsShimsDirectory,
 } from '../src/installer.js'
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
@@ -31,6 +35,81 @@ function temporaryHome(): string {
 }
 
 describe('standalone client installer', () => {
+  test('blocks a Windows daemon replacement while a Claude bridge is still active', () => {
+    expect(() => assertDaemonReplaceable('claude', {
+      profile: 'claude',
+      pid: 10008,
+      version: '0.2.9',
+      sessions: [{ id: 'active-session' }],
+    })).toThrow(DaemonReplacementBlockedError)
+    expect(() => assertDaemonReplaceable('claude', {
+      profile: 'claude',
+      pid: 10008,
+      version: '0.2.9',
+      sessions: [],
+    })).not.toThrow()
+  })
+
+  test('does not apply the Claude MCP guard to the Codex daemon', () => {
+    expect(() => assertDaemonReplaceable('codex', {
+      profile: 'codex',
+      pid: 3868,
+      version: '0.2.10',
+      sessions: [{ id: 'active-session' }],
+    })).not.toThrow()
+  })
+
+  test('blocks installation when a legacy daemon respawns after stop', async () => {
+    const responses = [
+      undefined,
+      { profile: 'claude', pid: 10008, version: '0.2.9' },
+    ]
+
+    await expect(assertDaemonStayedStopped(
+      'claude',
+      47321,
+      async () => responses.shift(),
+      async () => {},
+      responses.length,
+    )).rejects.toThrow('claude daemon restarted during install')
+  })
+
+  test('requires two consecutive health checks from the same expected daemon pid', async () => {
+    const responses = [
+      { profile: 'claude', pid: 10, version: '0.2.11' },
+      { profile: 'claude', pid: 11, version: '0.2.11' },
+      { profile: 'claude', pid: 11, version: '0.2.10' },
+      { profile: 'claude', pid: 11, version: '0.2.11' },
+      { profile: 'claude', pid: 11, version: '0.2.11' },
+    ]
+    let probes = 0
+
+    await waitForStableProfileHealth(
+      'claude',
+      '0.2.11',
+      47321,
+      async () => {
+        probes += 1
+        return responses.shift()
+      },
+      async () => {},
+      responses.length,
+    )
+
+    expect(probes).toBe(5)
+  })
+
+  test('rejects health responses without a stable daemon pid', async () => {
+    await expect(waitForStableProfileHealth(
+      'claude',
+      '0.2.11',
+      47321,
+      async () => ({ profile: 'claude', version: '0.2.11' }),
+      async () => {},
+      2,
+    )).rejects.toThrow('did not become healthy')
+  })
+
   test('registers one dynamic user-scoped Claude bridge', () => {
     const commands = installationCommands({
       target: 'both',
