@@ -12,8 +12,10 @@ import {
   resolveClaudeBinaryPath,
   resolveCodexBinaryPath,
   resolveWindowsCommand,
+  staleDaemonPids,
   waitForStableProfileHealth,
   windowsShimsDirectory,
+  type RunningProcess,
 } from '../src/installer.js'
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -205,6 +207,69 @@ describe('standalone client installer', () => {
     await expect(installCodexWrapper('/opt/router', false, 'linux', false, home))
       .rejects.toThrow('refusing to overwrite existing Codex executable')
     expect(readFileSync(path, 'utf8')).toBe('original codex binary')
+  })
+})
+
+describe('stale daemon sweep', () => {
+  const installDirectory = 'C:\\Users\\HP\\AppData\\Local\\Programs\\telegram-agent-router'
+  const routerProcess = (pid: number, version: string, argument: string): RunningProcess => ({
+    pid,
+    executablePath: `${installDirectory}\\telegram-agent-router-${version}.exe`,
+    commandLine: `${installDirectory}\\telegram-agent-router-${version}.exe ${argument}`,
+  })
+
+  test('sweeps previous-version daemons for the profiles being installed', () => {
+    const processes: RunningProcess[] = [
+      routerProcess(10008, '0.2.9', 'daemon --profile claude'),
+      routerProcess(45916, '0.2.10', 'daemon --profile codex'),
+      routerProcess(50960, '0.2.10', 'mcp --profile claude'),
+      routerProcess(56104, '0.2.10', 'launch claude -- '),
+    ]
+
+    expect(staleDaemonPids(processes, installDirectory, ['claude', 'codex'], 99999))
+      .toEqual([10008, 45916])
+    expect(staleDaemonPids(processes, installDirectory, ['codex'], 99999))
+      .toEqual([45916])
+  })
+
+  test('treats a daemon without an explicit profile as the codex default', () => {
+    const processes: RunningProcess[] = [{
+      pid: 4242,
+      executablePath: `${installDirectory}\\telegram-agent-router-0.2.9.exe`,
+      commandLine: `"${installDirectory}\\telegram-agent-router-0.2.9.exe"  daemon`,
+    }]
+
+    expect(staleDaemonPids(processes, installDirectory, ['codex'], 99999)).toEqual([4242])
+    expect(staleDaemonPids(processes, installDirectory, ['claude'], 99999)).toEqual([])
+  })
+
+  test('never sweeps the installer itself or daemons outside the install directory', () => {
+    const developmentDaemon: RunningProcess = {
+      pid: 777,
+      executablePath: 'C:\\Dev\\telegram-agent-router\\dist\\telegram-agent-router.exe',
+      commandLine: 'C:\\Dev\\telegram-agent-router\\dist\\telegram-agent-router.exe daemon --profile codex',
+    }
+    const self = routerProcess(31337, '0.2.12', 'daemon --profile codex')
+
+    expect(staleDaemonPids([developmentDaemon, self], installDirectory, ['claude', 'codex'], 31337))
+      .toEqual([])
+  })
+
+  test('matches the install directory case-insensitively and ignores broken rows', () => {
+    const upperCase: RunningProcess = {
+      pid: 5150,
+      executablePath: `${installDirectory.toUpperCase()}\\TELEGRAM-AGENT-ROUTER-0.2.9.EXE`,
+      commandLine: `${installDirectory.toUpperCase()}\\TELEGRAM-AGENT-ROUTER-0.2.9.EXE daemon --profile claude`,
+    }
+    const broken: RunningProcess[] = [
+      { pid: 1, executablePath: `${installDirectory}\\telegram-agent-router-0.2.9.exe`, commandLine: 'daemon' },
+      { executablePath: `${installDirectory}\\telegram-agent-router-0.2.9.exe`, commandLine: 'x daemon' },
+      { pid: 8888 },
+      { pid: 9999, executablePath: `${installDirectory}\\telegram-agent-router-0.2.9.exe` },
+    ]
+
+    expect(staleDaemonPids([upperCase, ...broken], installDirectory, ['claude', 'codex'], 99999))
+      .toEqual([5150])
   })
 })
 

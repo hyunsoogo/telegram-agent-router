@@ -75,6 +75,41 @@ integration('connects to and initializes the installed Codex App Server', async 
   }
 }, 30_000)
 
+integration('fails over to a free App Server port when the configured port is stuck', async () => {
+  const binary = Bun.which('codex')
+  expect(binary).toBeTruthy()
+  // Reproduces the orphaned-socket incident: a listener owns the configured
+  // port but never completes a WebSocket handshake, and codex cannot bind it.
+  const squatter = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } })
+  const stuckPort = squatter.port
+  const config = {
+    profile: 'codex' as const,
+    host: '127.0.0.1',
+    port: 47942,
+    appServerPort: stuckPort,
+    secret: 'failover-integration-test',
+    codexBinary: binary!,
+  }
+  const diagnosticEvents: string[] = []
+  const persistedPorts: number[] = []
+  const adapter = new CodexAppServer(
+    config,
+    async () => {},
+    event => diagnosticEvents.push(event),
+    port => persistedPorts.push(port),
+  )
+  try {
+    await adapter.start()
+    expect(config.appServerPort).not.toBe(stuckPort)
+    expect(persistedPorts).toEqual([config.appServerPort!])
+    expect(diagnosticEvents).toContain('app_server_port_failover')
+    expect(adapter.list()).toBeArray()
+  } finally {
+    await adapter.stop()
+    squatter.stop(true)
+  }
+}, 60_000)
+
 turnIntegration('injects a Telegram turn and receives the final Codex answer', async () => {
   const binary = Bun.which('codex')
   expect(binary).toBeTruthy()

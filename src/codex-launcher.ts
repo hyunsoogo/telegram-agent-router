@@ -83,7 +83,7 @@ export async function launchCodex(
 ): Promise<number> {
   if (!config.appServerPort) throw new Error('codex appServerPort is not configured')
   let argv = codexLaunchArgv(binaryPath, 'ws://127.0.0.1/unused', process.cwd(), args)
-  const routed = argv[1] === '--remote'
+  let routed = argv[1] === '--remote'
   if (routed && !await healthy(config)) {
     const routerBinary = process.execPath
     const daemon = Bun.spawn([routerBinary, 'daemon', '--profile', 'codex'], {
@@ -94,10 +94,28 @@ export async function launchCodex(
     daemon.unref()
     for (let attempt = 0; attempt < 40 && !await healthy(config); attempt += 1) await Bun.sleep(250)
   }
+  // The router only adds Telegram routing; it must never make Codex itself
+  // unavailable. If the daemon cannot serve this launch, degrade to a plain
+  // local Codex session instead of failing the command.
   if (routed && !await healthy(config)) {
-    throw new Error(`codex router did not become healthy; run doctor --profile codex (${paths.config})`)
+    process.stderr.write(
+      `telegram-agent-router: codex router is not healthy; starting Codex without Telegram routing.\n` +
+      `telegram-agent-router: run doctor --profile codex to repair it (${paths.config})\n`,
+    )
+    routed = false
+    argv = [binaryPath, ...args]
   }
-  if (routed) argv = codexLaunchArgv(binaryPath, await codexClientUrl(config), process.cwd(), args)
+  if (routed) {
+    try {
+      argv = codexLaunchArgv(binaryPath, await codexClientUrl(config), process.cwd(), args)
+    } catch (error) {
+      process.stderr.write(
+        `telegram-agent-router: codex client registration failed: ${String(error)}\n` +
+        `telegram-agent-router: starting Codex without Telegram routing.\n`,
+      )
+      argv = [binaryPath, ...args]
+    }
+  }
 
   const child = Bun.spawn(argv, {
     cwd: process.cwd(),

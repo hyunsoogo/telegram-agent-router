@@ -71,6 +71,12 @@ export function loadConfig(paths = statePaths()): RouterConfig {
   }
 }
 
+export function persistAppServerPort(port: number, paths = statePaths('codex')): void {
+  const existing = JSON.parse(readFileSync(paths.config, 'utf8')) as Partial<RouterConfig>
+  writeFileSync(paths.config, `${JSON.stringify({ ...existing, appServerPort: port }, null, 2)}\n`, { mode: 0o600 })
+  try { chmodSync(paths.config, 0o600) } catch {}
+}
+
 export function loadBotToken(paths = statePaths()): string {
   const profileToken = process.env[`TELEGRAM_BOT_TOKEN_${paths.profile.toUpperCase()}`]
   if (profileToken) return profileToken

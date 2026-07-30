@@ -4,7 +4,7 @@ import type { ServerWebSocket } from 'bun'
 import { randomUUID } from 'node:crypto'
 import { CodexAppServer } from './codex-app-server.js'
 import { CodexClientObserver, persistentCodexClientMessage } from './codex-client-observer.js'
-import { loadBotToken, loadConfig, statePaths, type RouterProfile } from './paths.js'
+import { loadBotToken, loadConfig, persistAppServerPort, statePaths, type RouterProfile } from './paths.js'
 import { parseBridgeMessage, type InboundEvent, type RouterAction, type RouterToBridge, type SessionDescriptor } from './protocol.js'
 import { SessionRegistry } from './session-registry.js'
 import { acquireDaemonLock } from './lock.js'
@@ -149,7 +149,13 @@ async function runOwnedDaemon(
           }
           rememberBotMessage(output.chatId, String(sent.message_id), output.sessionId)
         }
-      }, (event, details) => diagnostics?.log(event, details))
+      }, (event, details) => diagnostics?.log(event, details), port => {
+        try {
+          persistAppServerPort(port, paths)
+        } catch (error) {
+          process.stderr.write(`telegram-agent-router[codex]: could not persist App Server port ${port}: ${String(error)}\n`)
+        }
+      })
     : null
   if (codex) {
     try {

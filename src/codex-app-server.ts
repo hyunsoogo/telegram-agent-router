@@ -75,6 +75,40 @@ export async function readStderrTail(
   return new TextDecoder().decode(tail).trim()
 }
 
+export class CodexAppServerExitError extends Error {
+  constructor(readonly exitCode: number | null, readonly stderrTail: string) {
+    super(`Codex App Server exited during startup with code ${exitCode}${stderrTail ? `: ${stderrTail}` : ''}`)
+  }
+}
+
+// Rust prints bind failures as a locale-dependent message followed by a stable
+// "(os error N)" suffix: EADDRINUSE is 10048 on Windows, 98 on Linux, 48 on
+// macOS. 10013 (WSAEACCES) is Windows refusing a port inside an excluded range.
+const PORT_CONFLICT_PATTERN = /os error (?:10048|10013|98|48)\b|EADDRINUSE|address already in use/i
+
+export function isPortConflictExit(error: unknown): boolean {
+  return error instanceof CodexAppServerExitError && PORT_CONFLICT_PATTERN.test(error.stderrTail)
+}
+
+export function isPortBindable(port: number, hostname = '127.0.0.1'): boolean {
+  try {
+    const listener = Bun.listen({ hostname, port, socket: { data() {} } })
+    listener.stop(true)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function findBindablePort(start: number, attempts = 20, hostname = '127.0.0.1'): number {
+  for (let offset = 0; offset < attempts; offset += 1) {
+    const candidate = start + offset
+    if (candidate > 65535) break
+    if (isPortBindable(candidate, hostname)) return candidate
+  }
+  throw new Error(`no bindable port found between ${start} and ${Math.min(start + attempts - 1, 65535)}`)
+}
+
 function channelAttribute(value: string): string {
   return value
     .replaceAll('&', '&amp;')
@@ -123,11 +157,13 @@ export class CodexAppServer {
   private readonly subscribingThreads = new Map<string, Promise<void>>()
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private recovering = false
+  private startupStderrTail: Promise<string> = Promise.resolve('')
 
   constructor(
     private readonly config: RouterConfig,
     private readonly onOutput: (output: CodexOutput) => Promise<void>,
     private readonly onDiagnostic: (event: string, details?: Record<string, unknown>) => void = () => {},
+    private readonly onPortChange: (port: number) => void = () => {},
   ) {}
 
   async start(): Promise<void> {
@@ -256,12 +292,34 @@ export class CodexAppServer {
   }
 
   private async connectOrSpawn(): Promise<void> {
-    const url = this.url()
     try {
-      await this.connect(url, 750)
+      await this.connect(this.url(), 750)
       return
     } catch {}
 
+    try {
+      await this.spawnAndConnect()
+    } catch (error) {
+      const previous = this.config.appServerPort
+      if (previous === undefined || !isPortConflictExit(error)) throw error
+      // A dead App Server's listening socket can outlive it on Windows when a
+      // process spawned inside a Codex session inherited the handle. The port
+      // stays bound until that process dies, so move to one that binds.
+      const port = findBindablePort(previous + 1)
+      this.config.appServerPort = port
+      this.diagnose('app_server_port_failover', {
+        previous_port: previous,
+        app_server_port: port,
+        stderr_tail: (error as CodexAppServerExitError).stderrTail,
+      })
+      process.stderr.write(`telegram-agent-router[codex]: port ${previous} is stuck; moving App Server to ${port}\n`)
+      this.onPortChange(port)
+      await this.spawnAndConnect()
+    }
+  }
+
+  private async spawnAndConnect(): Promise<void> {
+    const url = this.url()
     if (!this.process || this.process.exitCode !== null) {
       const binary = this.config.codexBinary ?? Bun.which('codex')
       if (!binary) throw new Error('Codex CLI not found; configure the codex profile with --codex-binary')
@@ -269,6 +327,7 @@ export class CodexAppServer {
       const startedAt = Date.now()
       const stderrTail = readStderrTail(child.stderr).catch(() => '')
       this.process = child
+      this.startupStderrTail = stderrTail
       this.diagnose('app_server_spawned', {
         app_server_pid: child.pid,
         app_server_port: this.config.appServerPort,
@@ -292,7 +351,8 @@ export class CodexAppServer {
     let lastError: unknown
     for (let attempt = 0; attempt < 30; attempt += 1) {
       if (this.process.exitCode !== null) {
-        throw new Error(`Codex App Server exited during startup with code ${this.process.exitCode}`)
+        const stderrTail = await Promise.race([this.startupStderrTail, Bun.sleep(1_000).then(() => '')])
+        throw new CodexAppServerExitError(this.process.exitCode, stderrTail)
       }
       try {
         await this.connect(url, 750)

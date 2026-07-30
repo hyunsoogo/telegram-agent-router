@@ -12,7 +12,7 @@ import {
   type Stats,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { installAutostart } from './autostart.js'
 import { loadConfig, statePaths, type RouterProfile } from './paths.js'
 import { VERSION } from './version.js'
@@ -445,6 +445,92 @@ async function assertWindowsDaemonStayedStopped(profile: RouterProfile): Promise
   )
 }
 
+export type RunningProcess = {
+  pid?: number
+  commandLine?: string
+  executablePath?: string
+}
+
+function commandLineArguments(commandLine: string): string[] {
+  const trimmed = commandLine.trim()
+  const executableEnd = trimmed.startsWith('"') ? trimmed.indexOf('"', 1) + 1 : trimmed.search(/\s|$/)
+  return trimmed.slice(executableEnd).trim().split(/\s+/).filter(Boolean)
+}
+
+// The polite per-profile stop only reaches the daemon that answers on the
+// health port. Daemons from previous versions that crashed, lost their port,
+// or predate the health handshake linger forever; sweep every daemon process
+// that runs out of the install directory. Bridge processes (mcp, launch) stay
+// untouched because killing them drops live sessions.
+export function staleDaemonPids(
+  processes: RunningProcess[],
+  installDirectory: string,
+  profiles: RouterProfile[],
+  currentPid: number,
+): number[] {
+  const prefix = `${resolve(installDirectory).toLowerCase()}${sep}`
+  const pids: number[] = []
+  for (const candidate of processes) {
+    const pid = candidate.pid
+    if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 1 || pid === currentPid) continue
+    if (!candidate.executablePath || !resolve(candidate.executablePath).toLowerCase().startsWith(prefix)) continue
+    const args = commandLineArguments(candidate.commandLine ?? '')
+    if (args[0] !== 'daemon') continue
+    const profileFlag = args.indexOf('--profile')
+    const profile = profileFlag >= 0 ? args[profileFlag + 1] : 'codex'
+    if (!profiles.includes(profile as RouterProfile)) continue
+    pids.push(pid)
+  }
+  return pids
+}
+
+async function listWindowsRouterProcesses(): Promise<RunningProcess[]> {
+  const script = 'Get-CimInstance Win32_Process -Filter "Name LIKE \'telegram-agent-router%\'" | '
+    + 'Select-Object ProcessId,CommandLine,ExecutablePath | ConvertTo-Json -Compress'
+  const child = Bun.spawn(['powershell.exe', '-NoProfile', '-Command', script], {
+    stdin: 'ignore',
+    stdout: 'pipe',
+    stderr: 'ignore',
+  })
+  const output = await new Response(child.stdout).text()
+  if (await child.exited !== 0) throw new Error('could not enumerate running router processes')
+  const trimmed = output.trim()
+  if (!trimmed) return []
+  type Row = { ProcessId?: number; CommandLine?: string; ExecutablePath?: string }
+  const parsed = JSON.parse(trimmed) as Row | Row[]
+  return (Array.isArray(parsed) ? parsed : [parsed]).map(row => ({
+    pid: row.ProcessId,
+    ...(row.CommandLine ? { commandLine: row.CommandLine } : {}),
+    ...(row.ExecutablePath ? { executablePath: row.ExecutablePath } : {}),
+  }))
+}
+
+async function killStaleWindowsDaemons(profiles: RouterProfile[], dryRun: boolean): Promise<void> {
+  const directory = dirname(installedBinaryPath('win32'))
+  process.stdout.write(`kill leftover router daemons in ${directory}\n`)
+  if (dryRun) return
+  const pids = staleDaemonPids(await listWindowsRouterProcesses(), directory, profiles, process.pid)
+  for (const pid of pids) {
+    process.stdout.write(`kill stale daemon pid ${pid}\n`)
+    try {
+      process.kill(pid)
+    } catch {
+      continue
+    }
+    let stopped = false
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      try {
+        process.kill(pid, 0)
+        await Bun.sleep(100)
+      } catch {
+        stopped = true
+        break
+      }
+    }
+    if (!stopped) throw new Error(`stale daemon pid ${pid} did not stop`)
+  }
+}
+
 async function stopExistingWindowsDaemon(profile: RouterProfile, dryRun: boolean): Promise<void> {
   process.stdout.write(`check and stop existing ${profile} daemon if safe\n`)
   if (dryRun) return
@@ -528,6 +614,7 @@ export async function installClients(options: InstallOptions, dryRun: boolean): 
   const profiles: RouterProfile[] = options.target === 'both' ? ['claude', 'codex'] : [options.target]
   if (options.autostart !== false && platform === 'win32') {
     for (const profile of profiles) await stopExistingWindowsDaemon(profile, dryRun)
+    await killStaleWindowsDaemons(profiles, dryRun)
   }
   const binary = await installProgramBinary(sourceBinary, dryRun, platform)
   for (const command of installationCommands({ ...options, binaryPath: binary })) {
