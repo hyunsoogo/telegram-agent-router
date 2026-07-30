@@ -44,8 +44,12 @@ function xml(value: string): string {
     .replaceAll("'", '&apos;')
 }
 
-export function windowsRunCommand(binaryPath: string, profile: RouterProfile): string[] {
+function windowsStartAction(binaryPath: string, profile: RouterProfile): string {
   const escapedBinary = binaryPath.replaceAll("'", "''")
+  return `Start-Process -WindowStyle Hidden -FilePath '${escapedBinary}' -ArgumentList 'daemon --profile ${profile}'`
+}
+
+export function windowsRunCommand(binaryPath: string, profile: RouterProfile): string[] {
   const action = [
     'powershell.exe',
     '-NoLogo',
@@ -53,7 +57,7 @@ export function windowsRunCommand(binaryPath: string, profile: RouterProfile): s
     '-NonInteractive',
     '-WindowStyle Hidden',
     '-Command',
-    `"Start-Process -WindowStyle Hidden -FilePath '${escapedBinary}' -ArgumentList 'daemon --profile ${profile}'"`,
+    `"${windowsStartAction(binaryPath, profile)}"`,
   ].join(' ')
   return [
     'reg.exe',
@@ -63,6 +67,22 @@ export function windowsRunCommand(binaryPath: string, profile: RouterProfile): s
     '/t', 'REG_SZ',
     '/d', action,
     '/f',
+  ]
+}
+
+// Bun on Windows keeps spawned children in a job object that is torn down when
+// this process exits, so a daemon spawned directly dies the moment the
+// installer finishes — after the health check passed. Starting it through
+// Start-Process breaks the daemon out of the job so it outlives the install.
+export function windowsDaemonStartCommand(binaryPath: string, profile: RouterProfile): string[] {
+  return [
+    'powershell.exe',
+    '-NoLogo',
+    '-NoProfile',
+    '-NonInteractive',
+    '-WindowStyle', 'Hidden',
+    '-Command',
+    windowsStartAction(binaryPath, profile),
   ]
 }
 
@@ -121,12 +141,7 @@ function writeManagedFile(path: string, content: string, mode?: number): void {
 async function installWindows(options: AutostartOptions): Promise<void> {
   for (const profile of options.profiles) {
     await run(windowsRunCommand(options.binaryPath, profile), Boolean(options.dryRun))
-    const argv = [options.binaryPath, 'daemon', '--profile', profile]
-    process.stdout.write(`${argv.map(quote).join(' ')}\n`)
-    if (!options.dryRun) {
-      const daemon = Bun.spawn(argv, { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' })
-      daemon.unref()
-    }
+    await run(windowsDaemonStartCommand(options.binaryPath, profile), Boolean(options.dryRun))
   }
 }
 

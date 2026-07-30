@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { launchAgentPlist, systemdUserUnit, windowsRunCommand } from '../src/autostart.js'
+import { launchAgentPlist, systemdUserUnit, windowsDaemonStartCommand, windowsRunCommand } from '../src/autostart.js'
 
 describe('cross-platform automatic start definitions', () => {
   test('Windows uses a per-user login Run entry', () => {
@@ -18,6 +18,23 @@ describe('cross-platform automatic start definitions', () => {
       "powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command " +
       "\"Start-Process -WindowStyle Hidden -FilePath 'C:\\Program Files\\O''Brien\\router.exe' " +
       "-ArgumentList 'daemon --profile claude'\"",
+    )
+  })
+
+  test('Windows starts the daemon through Start-Process so it outlives the installer', () => {
+    const command = windowsDaemonStartCommand('C:\\Tools\\router.exe', 'codex')
+    expect(command[0]).toBe('powershell.exe')
+    expect(command).toContain('-NonInteractive')
+    expect(command.at(-1)).toBe(
+      "Start-Process -WindowStyle Hidden -FilePath 'C:\\Tools\\router.exe' -ArgumentList 'daemon --profile codex'",
+    )
+  })
+
+  test('Windows daemon start quotes apostrophes like the Run entry', () => {
+    const command = windowsDaemonStartCommand("C:\\Program Files\\O'Brien\\router.exe", 'claude')
+    expect(command.at(-1)).toBe(
+      "Start-Process -WindowStyle Hidden -FilePath 'C:\\Program Files\\O''Brien\\router.exe' " +
+      "-ArgumentList 'daemon --profile claude'",
     )
   })
 
