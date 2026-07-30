@@ -143,6 +143,20 @@ Pull and rebuild for the current platform, then run the same compiled
 route history are preserved; the versioned executable, wrappers, MCP
 registration, and automatic-start entries are replaced.
 
+Updating the Codex CLI itself does not require reinstalling the router. Codex
+administrative commands such as `codex update` bypass remote routing. On the
+next interactive launch, the wrapper reports the resolved real binary and its
+file identity to the daemon. An in-place update is detected from file metadata;
+if the recorded path disappeared, the wrapper searches `PATH` while skipping
+its own managed shim.
+
+When no routed Codex clients or deliveries are active, the daemon starts the
+new App Server on a separate loopback port and initializes it before switching.
+Failed validation leaves the previous App Server running. If older routed
+sessions are still open, their server is not interrupted: the new invocation
+runs as ordinary Codex and prints a prompt to close the older sessions and
+launch Codex again to refresh Telegram routing.
+
 The installer resolves `claude` and `codex` symlinks to their real executables
 before replacing the links with managed wrappers. It refuses to overwrite an
 unrecognized regular file at either wrapper path.

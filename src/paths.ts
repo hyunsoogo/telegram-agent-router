@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { randomBytes } from 'node:crypto'
@@ -71,10 +71,40 @@ export function loadConfig(paths = statePaths()): RouterConfig {
   }
 }
 
-export function persistAppServerPort(port: number, paths = statePaths('codex')): void {
+export function persistConfigPatch(
+  patch: Partial<RouterConfig>,
+  paths = statePaths(),
+): void {
   const existing = JSON.parse(readFileSync(paths.config, 'utf8')) as Partial<RouterConfig>
-  writeFileSync(paths.config, `${JSON.stringify({ ...existing, appServerPort: port }, null, 2)}\n`, { mode: 0o600 })
+  const temporary = `${paths.config}.new-${process.pid}-${Date.now()}`
+  writeFileSync(temporary, `${JSON.stringify({ ...existing, ...patch }, null, 2)}\n`, { mode: 0o600 })
+  try { chmodSync(temporary, 0o600) } catch {}
+  try {
+    renameSync(temporary, paths.config)
+  } catch (error) {
+    try { unlinkSync(temporary) } catch {}
+    throw error
+  }
   try { chmodSync(paths.config, 0o600) } catch {}
+}
+
+export function persistAppServerPort(port: number, paths = statePaths('codex')): void {
+  persistConfigPatch({ appServerPort: port }, paths)
+}
+
+export function persistCodexBinary(codexBinary: string, paths = statePaths('codex')): void {
+  persistConfigPatch({ codexBinary: resolve(codexBinary) }, paths)
+}
+
+export function persistCodexRuntime(
+  codexBinary: string,
+  appServerPort: number,
+  paths = statePaths('codex'),
+): void {
+  persistConfigPatch({
+    codexBinary: resolve(codexBinary),
+    appServerPort,
+  }, paths)
 }
 
 export function loadBotToken(paths = statePaths()): string {

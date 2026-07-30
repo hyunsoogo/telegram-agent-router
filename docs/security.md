@@ -15,6 +15,9 @@ The daemon binds to `127.0.0.1` by default. Bridge and health endpoints require
 a random secret stored with mode `0600` where supported. Codex launchers use the
 secret once to open a 30-second, single-use loopback proxy port; the long-lived
 CLI command line contains neither the profile secret nor an authenticated URL.
+Codex client registration additionally rejects non-loopback callers even when
+the daemon is configured to listen on a broader interface, because registration
+can select the local Codex executable used for App Server handoff.
 
 ### One daemon
 

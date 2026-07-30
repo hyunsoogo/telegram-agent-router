@@ -67,6 +67,25 @@ starts only when an interactive Claude session opens. The Codex profile daemon
 starts and supervises the shared App Server; Codex CLI clients attach when
 launched.
 
+### Codex CLI updates
+
+The managed wrapper lets Codex administrative commands, including
+`codex update`, run directly. No router reinstall is needed afterward. The next
+interactive launch:
+
+1. resolves the recorded real Codex executable, falling back to an unmanaged
+   `codex` on `PATH` if that path no longer exists;
+2. reports its canonical path so the daemon can compare path, size, and
+   modification time;
+3. keeps the current App Server while any routed client or delivery is active;
+4. otherwise initializes a candidate App Server on a separate loopback port
+   before switching and persisting the new binary and port.
+
+If candidate initialization fails, the existing App Server remains running. If
+an older routed session blocks the switch, the new command runs as ordinary
+Codex without Telegram routing and tells the user to close the older sessions
+and launch it again.
+
 Tokens may also be configured separately before installation:
 
 ```text

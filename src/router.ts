@@ -4,7 +4,14 @@ import type { ServerWebSocket } from 'bun'
 import { randomUUID } from 'node:crypto'
 import { CodexAppServer } from './codex-app-server.js'
 import { CodexClientObserver, persistentCodexClientMessage } from './codex-client-observer.js'
-import { loadBotToken, loadConfig, persistAppServerPort, statePaths, type RouterProfile } from './paths.js'
+import {
+  loadBotToken,
+  loadConfig,
+  persistAppServerPort,
+  persistCodexRuntime,
+  statePaths,
+  type RouterProfile,
+} from './paths.js'
 import { parseBridgeMessage, type InboundEvent, type RouterAction, type RouterToBridge, type SessionDescriptor } from './protocol.js'
 import { SessionRegistry } from './session-registry.js'
 import { acquireDaemonLock } from './lock.js'
@@ -25,6 +32,92 @@ type CodexProxySocketData = {
 type StoppableServer = {
   port?: number
   stop(closeActiveConnections?: boolean): void
+}
+
+type CodexRegistrationTarget = Pick<CodexAppServer, 'prepareBinary'>
+
+export class CodexRegistrationLock {
+  private tail: Promise<void> = Promise.resolve()
+
+  async run<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.tail
+    let release!: () => void
+    this.tail = new Promise<void>(resolve => { release = resolve })
+    await previous
+    try {
+      return await operation()
+    } finally {
+      release()
+    }
+  }
+}
+
+export function isLoopbackAddress(address: string | undefined): boolean {
+  if (!address) return false
+  const normalized = address.toLowerCase().split('%')[0]!
+  return normalized === '::1'
+    || normalized.startsWith('127.')
+    || normalized.startsWith('::ffff:127.')
+}
+
+export async function handleCodexClientRegistration(
+  request: Request,
+  options: {
+    secret: string
+    loopback: boolean
+    codex: CodexRegistrationTarget
+    lock: CodexRegistrationLock
+    proxyCount(): number
+    createProxy(): string
+    diagnose?(event: string, details?: Record<string, unknown>): void
+  },
+): Promise<Response> {
+  if (request.method !== 'POST') return new Response('method not allowed', { status: 405 })
+  if (!options.loopback) return new Response('loopback connection required', { status: 403 })
+  if (request.headers.get('authorization') !== `Bearer ${options.secret}`) {
+    return new Response('unauthorized', { status: 401 })
+  }
+  let body: { binaryPath?: unknown }
+  try {
+    body = await request.json() as { binaryPath?: unknown }
+  } catch {
+    return Response.json({ code: 'invalid_codex_registration', error: 'JSON body required' }, { status: 400 })
+  }
+  if (typeof body.binaryPath !== 'string' || !body.binaryPath.trim()) {
+    return Response.json({ code: 'invalid_codex_registration', error: 'binaryPath is required' }, { status: 400 })
+  }
+  const binaryPath = body.binaryPath
+
+  return options.lock.run(async () => {
+    let preparation: Awaited<ReturnType<CodexRegistrationTarget['prepareBinary']>>
+    try {
+      preparation = await options.codex.prepareBinary(binaryPath, options.proxyCount())
+    } catch (error) {
+      options.diagnose?.('codex_binary_prepare_failed', {
+        binary: binaryPath,
+        error: String(error),
+      })
+      return Response.json({
+        code: 'codex_binary_prepare_failed',
+        error: 'Codex App Server could not switch to the requested binary',
+      }, { status: 503 })
+    }
+    if (preparation.status === 'busy') {
+      return Response.json({
+        code: 'codex_binary_change_pending',
+        sessions: preparation.sessions,
+      }, { status: 409 })
+    }
+    try {
+      return Response.json({ url: options.createProxy() })
+    } catch (error) {
+      options.diagnose?.('codex_client_proxy_failed', { error: String(error) })
+      return Response.json({
+        code: 'codex_client_proxy_failed',
+        error: 'Codex client proxy could not be created',
+      }, { status: 503 })
+    }
+  })
 }
 
 type BridgeSocket = ServerWebSocket<SocketData>
@@ -124,6 +217,7 @@ async function runOwnedDaemon(
   const registry = new SessionRegistry<BridgeSocket>()
   const pendingDeliveries = new Map<string, PendingDelivery>()
   const codexClientProxies = new Set<StoppableServer>()
+  const codexRegistrationLock = new CodexRegistrationLock()
   const bot = new Bot(token)
   const rememberBotMessage = (chatId: string, messageId: string, sessionId: string): void => {
     try {
@@ -155,7 +249,7 @@ async function runOwnedDaemon(
         } catch (error) {
           process.stderr.write(`telegram-agent-router[codex]: could not persist App Server port ${port}: ${String(error)}\n`)
         }
-      })
+      }, (binary, port) => persistCodexRuntime(binary, port, paths))
     : null
   if (codex) {
     try {
@@ -282,16 +376,21 @@ async function runOwnedDaemon(
           profile: paths.profile,
           sessions: allSessions(),
           codex_app_server: codex ? `127.0.0.1:${config.appServerPort}` : undefined,
+          codex_binary: codex?.binaryIdentity(),
           uptime_s: Math.round(process.uptime()),
         })
       }
       if (url.pathname === '/codex-client/register') {
         if (!codex) return new Response('Codex profile required', { status: 404 })
-        if (request.method !== 'POST') return new Response('method not allowed', { status: 405 })
-        if (request.headers.get('authorization') !== `Bearer ${config.secret}`) {
-          return new Response('unauthorized', { status: 401 })
-        }
-        return Response.json({ url: createCodexClientProxy() })
+        return handleCodexClientRegistration(request, {
+          secret: config.secret,
+          loopback: isLoopbackAddress(bunServer.requestIP(request)?.address),
+          codex,
+          lock: codexRegistrationLock,
+          proxyCount: () => codexClientProxies.size,
+          createProxy: createCodexClientProxy,
+          diagnose: (event, details) => diagnostics?.log(event, details),
+        })
       }
       if (url.pathname === '/bridge') {
         if (paths.profile !== 'claude') return new Response('bridge is Claude-only', { status: 404 })

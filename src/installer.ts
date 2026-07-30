@@ -5,7 +5,6 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
-  realpathSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -14,6 +13,11 @@ import {
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { installAutostart } from './autostart.js'
+import {
+  CLIENT_WRAPPER_MARKERS,
+  isManagedClientWrapper,
+  resolveClientBinaryPath,
+} from './client-binary.js'
 import { loadConfig, statePaths, type RouterProfile } from './paths.js'
 import { VERSION } from './version.js'
 
@@ -47,12 +51,6 @@ export class DaemonReplacementBlockedError extends Error {}
 
 type HealthProbe = () => Promise<DaemonHealth | undefined>
 type Delay = (milliseconds: number) => Promise<void>
-
-const WRAPPER_MARKERS: Record<WrapperClient, string> = {
-  claude: 'telegram-agent-router managed Claude wrapper',
-  codex: 'telegram-agent-router managed Codex wrapper',
-}
-const MAX_WRAPPER_BYTES = 16 * 1024
 
 export function resolveBinaryPath(explicit?: string): string {
   if (explicit) return resolve(explicit)
@@ -90,7 +88,7 @@ export function codexWrapperContent(
   binaryPath: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
-  const marker = WRAPPER_MARKERS.codex
+  const marker = CLIENT_WRAPPER_MARKERS.codex
   if (platform === 'win32') {
     return `@echo off\r\nrem ${marker}\r\n"${binaryPath.replaceAll('"', '""')}" launch codex -- %*\r\n`
   }
@@ -101,7 +99,7 @@ export function claudeWrapperContent(
   binaryPath: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
-  const marker = WRAPPER_MARKERS.claude
+  const marker = CLIENT_WRAPPER_MARKERS.claude
   if (platform === 'win32') {
     return `@echo off\r\nrem ${marker}\r\n"${binaryPath.replaceAll('"', '""')}" launch claude -- %*\r\n`
   }
@@ -115,42 +113,6 @@ function lstatIfPresent(path: string): Stats | undefined {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw error
   }
-}
-
-function isManagedWrapper(
-  path: string,
-  stats: Stats,
-  client: WrapperClient,
-  platform: NodeJS.Platform,
-): boolean {
-  if (!stats.isFile() || stats.size > MAX_WRAPPER_BYTES) return false
-  const content = readFileSync(path, 'utf8')
-  if (content.includes(WRAPPER_MARKERS[client])) return true
-  if (client === 'claude') return false
-  return platform === 'win32'
-    ? content.includes(' launch codex -- %*')
-    : content.includes(' launch codex -- "$@"')
-}
-
-function resolveClientBinaryPath(
-  candidate: string | undefined,
-  client: WrapperClient,
-  platform: NodeJS.Platform = process.platform,
-): string | undefined {
-  if (!candidate) return undefined
-  const absolute = resolve(candidate)
-  let canonical: string
-  try {
-    canonical = realpathSync(absolute)
-  } catch {
-    throw new Error(`Codex binary does not resolve to an existing file: ${absolute}`)
-  }
-  const stats = lstatSync(canonical)
-  if (isManagedWrapper(canonical, stats, client, platform)) {
-    const label = client === 'claude' ? 'Claude' : 'Codex'
-    throw new Error(`${label} binary resolves to the managed router wrapper: ${canonical}; pass --${client}-binary with the real executable`)
-  }
-  return canonical
 }
 
 export function resolveClaudeBinaryPath(
@@ -269,7 +231,7 @@ async function writeManagedWrapper(
   platform: NodeJS.Platform,
 ): Promise<void> {
   const existing = lstatIfPresent(path)
-  if (existing && !existing.isSymbolicLink() && !isManagedWrapper(path, existing, client, platform)) {
+  if (existing && !existing.isSymbolicLink() && !isManagedClientWrapper(path, client, platform)) {
     const label = client === 'claude' ? 'Claude' : 'Codex'
     throw new Error(`refusing to overwrite existing ${label} executable: ${path}; pass --${client}-binary with the real executable and move it outside the wrapper path`)
   }
@@ -372,7 +334,7 @@ export function resolveWindowsCommand(
       const candidate = join(directory, `${client}${extension.toLowerCase()}`)
       const stats = lstatIfPresent(candidate)
       if (!stats?.isFile()) continue
-      return { path: candidate, managed: isManagedWrapper(candidate, stats, client, platform) }
+      return { path: candidate, managed: isManagedClientWrapper(candidate, client, platform) }
     }
   }
   return undefined

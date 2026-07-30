@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { persistAppServerPort, type StatePaths } from '../src/paths.js'
+import { join, resolve } from 'node:path'
+import {
+  persistAppServerPort,
+  persistCodexBinary,
+  persistCodexRuntime,
+  type StatePaths,
+} from '../src/paths.js'
 
 const temporaryDirectories: string[] = []
 
@@ -54,5 +59,51 @@ describe('codex App Server port persistence', () => {
     const paths = temporaryCodexPaths()
 
     expect(() => persistAppServerPort(47325, paths)).toThrow()
+  })
+
+  test('updates the Codex binary without losing the App Server port', () => {
+    const paths = temporaryCodexPaths()
+    writeFileSync(paths.config, JSON.stringify({
+      profile: 'codex',
+      host: '127.0.0.1',
+      port: 47322,
+      secret: 'keep-this-secret',
+      appServerPort: 47325,
+      codexBinary: 'C:\\codex\\old\\codex.exe',
+    }, null, 2))
+
+    persistCodexBinary('C:\\codex\\new\\codex.exe', paths)
+
+    expect(JSON.parse(readFileSync(paths.config, 'utf8'))).toEqual({
+      profile: 'codex',
+      host: '127.0.0.1',
+      port: 47322,
+      secret: 'keep-this-secret',
+      appServerPort: 47325,
+      codexBinary: resolve('C:\\codex\\new\\codex.exe'),
+    })
+  })
+
+  test('updates the Codex binary and App Server port together', () => {
+    const paths = temporaryCodexPaths()
+    writeFileSync(paths.config, JSON.stringify({
+      profile: 'codex',
+      host: '127.0.0.1',
+      port: 47322,
+      secret: 'keep-this-secret',
+      appServerPort: 47325,
+      codexBinary: 'C:\\codex\\old\\codex.exe',
+    }, null, 2))
+
+    persistCodexRuntime('C:\\codex\\new\\codex.exe', 47326, paths)
+
+    expect(JSON.parse(readFileSync(paths.config, 'utf8'))).toEqual({
+      profile: 'codex',
+      host: '127.0.0.1',
+      port: 47322,
+      secret: 'keep-this-secret',
+      appServerPort: 47326,
+      codexBinary: resolve('C:\\codex\\new\\codex.exe'),
+    })
   })
 })

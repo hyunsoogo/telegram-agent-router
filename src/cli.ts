@@ -4,6 +4,7 @@ import { resolve } from 'node:path'
 import { runMcpBridge, type BridgeOptions } from './bridge.js'
 import { launchClaude } from './claude-launcher.js'
 import { launchCodex } from './codex-launcher.js'
+import { resolveCodexRuntimeBinary } from './client-binary.js'
 import {
   asProfile,
   configureState,
@@ -232,6 +233,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (!['claude', 'codex', 'both'].includes(target)) throw new Error('invalid install client; expected claude, codex, or both')
     const includesClaude = target === 'claude' || target === 'both'
     const includesCodex = target === 'codex' || target === 'both'
+    const requestedCodexBinary = option(args, '--codex-binary')
     let configuredClaudeBinary: string | undefined
     let configuredCodexBinary: string | undefined
     try { configuredClaudeBinary = loadConfig(statePaths('claude')).claudeBinary } catch {}
@@ -243,11 +245,13 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         ?? undefined)
       : undefined
     const codexBinary = includesCodex
-      ? resolveCodexBinaryPath(option(args, '--codex-binary')
-        ?? configuredCodexBinary
-        ?? Bun.which('codex')
-        ?? undefined)
+      ? requestedCodexBinary
+        ? resolveCodexBinaryPath(requestedCodexBinary)
+        : resolveCodexRuntimeBinary(configuredCodexBinary)
       : undefined
+    if (includesCodex && !codexBinary) {
+      throw new Error('real Codex binary is not available; install Codex or pass --codex-binary <path>')
+    }
     const dryRun = args.includes('--dry-run')
     const claudeToken = option(args, '--claude-token') ?? process.env.TELEGRAM_BOT_TOKEN_CLAUDE
     const codexToken = option(args, '--codex-token') ?? process.env.TELEGRAM_BOT_TOKEN_CODEX
@@ -293,8 +297,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       if (!config.claudeBinary) throw new Error('real Claude binary is not configured; rerun install --client claude --claude-binary <path>')
       process.exitCode = await launchClaude(config.claudeBinary, clientArgs)
     } else {
-      if (!config.codexBinary) throw new Error('real Codex binary is not configured; rerun install --client codex --codex-binary <path>')
-      process.exitCode = await launchCodex(config.codexBinary, paths, config, clientArgs)
+      const codexBinary = resolveCodexRuntimeBinary(config.codexBinary)
+      if (!codexBinary) throw new Error('real Codex binary is not available; reinstall Codex or rerun install --client codex --codex-binary <path>')
+      config.codexBinary = codexBinary
+      process.exitCode = await launchCodex(codexBinary, paths, config, clientArgs)
     }
     return
   }

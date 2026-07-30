@@ -3,6 +3,7 @@ import {
   CODEX_APP_SERVER_STDIO,
   CodexAppServer,
   CodexAppServerExitError,
+  codexBinaryPreparationDecision,
   codexTelegramInputText,
   findBindablePort,
   isPortBindable,
@@ -10,7 +11,11 @@ import {
   readStderrTail,
   spawnCodexAppServer,
 } from '../src/codex-app-server.js'
+import type { ClientBinaryIdentity } from '../src/client-binary.js'
 import type { CodexThread } from '../src/codex-client-observer.js'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 describe('Codex Telegram input formatting', () => {
   test('captures only App Server stderr for bounded diagnostics', () => {
@@ -134,6 +139,287 @@ describe('Codex App Server port failover', () => {
   test('refuses to scan past the end of the port range', () => {
     expect(() => findBindablePort(65536)).toThrow('no bindable port found')
   })
+})
+
+describe('Codex binary replacement policy', () => {
+  const current: ClientBinaryIdentity = {
+    path: 'C:\\tools\\codex.exe',
+    size: 100,
+    mtimeMs: 1,
+  }
+
+  test('keeps an identical binary without interrupting active work', () => {
+    expect(codexBinaryPreparationDecision(current, { ...current }, true)).toBe('ready')
+  })
+
+  test('defers a changed binary while a client is active', () => {
+    expect(codexBinaryPreparationDecision(current, {
+      ...current,
+      size: 101,
+      mtimeMs: 2,
+    }, true)).toBe('busy')
+  })
+
+  test('replaces a changed or unknown binary only while idle', () => {
+    const updated = { ...current, size: 101, mtimeMs: 2 }
+    expect(codexBinaryPreparationDecision(current, updated, false)).toBe('replace')
+    expect(codexBinaryPreparationDecision(undefined, updated, false)).toBe('replace')
+    expect(codexBinaryPreparationDecision(undefined, updated, true)).toBe('busy')
+  })
+})
+
+function availablePort(): number {
+  const listener = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } })
+  const port = listener.port
+  listener.stop(true)
+  return port
+}
+
+async function replacementFixture(
+  candidateMode: 'ready' | 'reject' | 'exit-after-initialize' = 'ready',
+  failPersistence = false,
+): Promise<{
+  adapter: CodexAppServer
+  config: {
+    profile: 'codex'
+    host: string
+    port: number
+    appServerPort: number
+    secret: string
+    codexBinary: string
+  }
+  oldBinary: string
+  newBinary: string
+  diagnostics: string[]
+  cleanup(): Promise<void>
+}> {
+  const directory = mkdtempSync(join(tmpdir(), 'telegram-agent-router-replacement-'))
+  const oldBinary = join(directory, 'codex-old')
+  const newBinary = join(directory, 'codex-new')
+  writeFileSync(oldBinary, 'old Codex')
+  writeFileSync(newBinary, 'new Codex with a different identity')
+  chmodSync(oldBinary, 0o755)
+  chmodSync(newBinary, 0o755)
+  const fixture = join(import.meta.dir, 'fixtures', 'mock-codex-app-server.ts')
+  const config = {
+    profile: 'codex' as const,
+    host: '127.0.0.1',
+    port: availablePort(),
+    appServerPort: availablePort(),
+    secret: 'replacement-test',
+    codexBinary: oldBinary,
+  }
+  const diagnostics: string[] = []
+  const adapter = new CodexAppServer(
+    config,
+    async () => {},
+    event => diagnostics.push(event),
+    () => {},
+    binary => {
+      if (failPersistence && binary === newBinary) throw new Error('mock config write failed')
+    },
+    (argv, options) => Bun.spawn([
+      process.execPath,
+      'run',
+      fixture,
+      argv[3]!,
+      argv[0] === newBinary ? candidateMode : 'ready',
+    ], options),
+  )
+  await adapter.start()
+  return {
+    adapter,
+    config,
+    oldBinary,
+    newBinary,
+    diagnostics,
+    async cleanup() {
+      await adapter.stop()
+      rmSync(directory, { recursive: true, force: true })
+    },
+  }
+}
+
+async function initializeMockPeer(port: number): Promise<WebSocket> {
+  const socket = new WebSocket(`ws://127.0.0.1:${port}`)
+  await new Promise<void>((resolve, reject) => {
+    socket.addEventListener('open', () => resolve(), { once: true })
+    socket.addEventListener('error', () => reject(new Error('mock App Server connection failed')), { once: true })
+  })
+  const initialized = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('mock App Server initialization timed out')), 2_000)
+    socket.addEventListener('message', event => {
+      const message = JSON.parse(String(event.data)) as { id?: number; error?: unknown }
+      if (message.id !== 1) return
+      clearTimeout(timer)
+      if (message.error) reject(new Error('mock App Server rejected initialization'))
+      else resolve()
+    }, { once: true })
+  })
+  socket.send(JSON.stringify({ id: 1, method: 'initialize', params: {} }))
+  await initialized
+  socket.send(JSON.stringify({ method: 'initialized' }))
+  return socket
+}
+
+describe('Codex App Server binary handoff', () => {
+  test('validates a candidate before switching away from the current server', async () => {
+    const fixture = await replacementFixture()
+    const originalPort = fixture.config.appServerPort
+    try {
+      fixture.adapter.clientAttached('older-client', thread('older-thread'))
+      expect(await fixture.adapter.prepareBinary(fixture.newBinary)).toEqual({
+        status: 'busy',
+        sessions: 1,
+      })
+      expect(fixture.config.appServerPort).toBe(originalPort)
+      fixture.adapter.clientDetached('older-client')
+
+      const replacement = fixture.adapter.prepareBinary(fixture.newBinary)
+      expect(await fixture.adapter.prepareBinary(fixture.oldBinary)).toEqual({
+        status: 'busy',
+        sessions: 1,
+      })
+      expect((await replacement).status).toBe('ready')
+      expect(fixture.adapter.binaryIdentity()?.path).toBe(fixture.newBinary)
+      expect(fixture.config.appServerPort).not.toBe(originalPort)
+      expect(fixture.diagnostics).toContain('codex_binary_replacement_completed')
+    } finally {
+      await fixture.cleanup()
+    }
+  }, 15_000)
+
+  test('keeps the current server when candidate initialization fails', async () => {
+    const fixture = await replacementFixture('reject')
+    const originalPort = fixture.config.appServerPort
+    let peer: WebSocket | undefined
+    try {
+      await expect(fixture.adapter.prepareBinary(fixture.newBinary))
+        .rejects.toThrow('kept the previous server running')
+      expect(fixture.adapter.binaryIdentity()?.path).toBe(fixture.oldBinary)
+      expect(fixture.config.appServerPort).toBe(originalPort)
+      expect(fixture.diagnostics).toContain('codex_binary_replacement_rolled_back')
+      expect(await fixture.adapter.prepareBinary(fixture.oldBinary)).toEqual({
+        status: 'ready',
+        changed: false,
+      })
+      peer = await initializeMockPeer(originalPort)
+    } finally {
+      peer?.close()
+      await fixture.cleanup()
+    }
+  }, 15_000)
+
+  test('keeps the current server when the candidate exits after initialization', async () => {
+    const fixture = await replacementFixture('exit-after-initialize')
+    const originalPort = fixture.config.appServerPort
+    let peer: WebSocket | undefined
+    try {
+      await expect(fixture.adapter.prepareBinary(fixture.newBinary))
+        .rejects.toThrow('kept the previous server running')
+      expect(fixture.adapter.binaryIdentity()?.path).toBe(fixture.oldBinary)
+      expect(fixture.config.appServerPort).toBe(originalPort)
+      peer = await initializeMockPeer(originalPort)
+    } finally {
+      peer?.close()
+      await fixture.cleanup()
+    }
+  }, 15_000)
+
+  test('rolls back when the new binary and port cannot be persisted', async () => {
+    const fixture = await replacementFixture('ready', true)
+    const originalPort = fixture.config.appServerPort
+    let peer: WebSocket | undefined
+    try {
+      await expect(fixture.adapter.prepareBinary(fixture.newBinary))
+        .rejects.toThrow('kept the previous server running')
+      expect(fixture.adapter.binaryIdentity()?.path).toBe(fixture.oldBinary)
+      expect(fixture.config.appServerPort).toBe(originalPort)
+      expect(fixture.config.codexBinary).toBe(fixture.oldBinary)
+      expect(fixture.diagnostics).toContain('codex_binary_persist_failed')
+      peer = await initializeMockPeer(originalPort)
+    } finally {
+      peer?.close()
+      await fixture.cleanup()
+    }
+  }, 15_000)
+
+  test('defers replacement for an attached unowned server without spawning an orphan', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'telegram-agent-router-unowned-'))
+    const oldBinary = join(directory, 'codex-old')
+    const newBinary = join(directory, 'codex-new')
+    writeFileSync(oldBinary, 'old Codex')
+    writeFileSync(newBinary, 'new Codex with a different identity')
+    chmodSync(oldBinary, 0o755)
+    chmodSync(newBinary, 0o755)
+    const fixture = join(import.meta.dir, 'fixtures', 'mock-codex-app-server.ts')
+    const appServerPort = availablePort()
+    const external = Bun.spawn([
+      process.execPath,
+      'run',
+      fixture,
+      `ws://127.0.0.1:${appServerPort}`,
+      'ready',
+    ], {
+      stdin: 'ignore',
+      stdout: 'ignore',
+      stderr: 'ignore',
+    })
+    let readiness: WebSocket | undefined
+    for (let attempt = 0; attempt < 30 && !readiness; attempt += 1) {
+      try {
+        readiness = await initializeMockPeer(appServerPort)
+      } catch {
+        await Bun.sleep(50)
+      }
+    }
+    if (!readiness) throw new Error('external mock App Server did not start')
+    readiness.close()
+
+    const config = {
+      profile: 'codex' as const,
+      host: '127.0.0.1',
+      port: availablePort(),
+      appServerPort,
+      secret: 'unowned-test',
+      codexBinary: oldBinary,
+    }
+    const diagnostics: string[] = []
+    const persisted: Array<{ binary: string; port: number }> = []
+    let spawnCalls = 0
+    const adapter = new CodexAppServer(
+      config,
+      async () => {},
+      event => diagnostics.push(event),
+      () => {},
+      (binary, port) => persisted.push({ binary, port }),
+      () => {
+        spawnCalls += 1
+        throw new Error('an attached unowned server must not be replaced')
+      },
+    )
+    let peer: WebSocket | undefined
+    try {
+      await adapter.start()
+      expect(await adapter.prepareBinary(newBinary)).toEqual({
+        status: 'ready',
+        changed: false,
+      })
+      expect(spawnCalls).toBe(0)
+      expect(config.appServerPort).toBe(appServerPort)
+      expect(config.codexBinary).toBe(newBinary)
+      expect(persisted).toEqual([{ binary: newBinary, port: appServerPort }])
+      expect(diagnostics).toContain('app_server_attached_unowned')
+      expect(diagnostics).toContain('codex_binary_replacement_deferred_unowned')
+      peer = await initializeMockPeer(appServerPort)
+    } finally {
+      peer?.close()
+      await adapter.stop()
+      external.kill()
+      await external.exited.catch(() => {})
+      rmSync(directory, { recursive: true, force: true })
+    }
+  }, 15_000)
 })
 
 function thread(id: string, cwd = '/work/project'): CodexThread {

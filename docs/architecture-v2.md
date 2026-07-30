@@ -155,6 +155,20 @@ port, and invokes the real binary with the router proxy's host-and-port-only
 `--remote` URL. The resolved real Codex path is stored at install time to
 prevent wrapper recursion.
 
+Every interactive Codex registration also includes the real binary path. The
+daemon compares its canonical path, size, and modification time with the
+identity of the supervised App Server. Identical clients attach normally. A
+changed binary is deferred while any CLI proxy, tracked thread, active turn, or
+delivery queue exists.
+
+When idle, replacement is blue-green: the daemon starts and initializes the
+candidate App Server on a free loopback port while the previous process and
+adapter socket remain alive. Only a validated candidate becomes current; its
+binary path and port are then persisted and the previous process is stopped.
+Startup or initialization failure closes the candidate and restores the
+untouched previous socket. This also detects normal in-place Codex upgrades
+without requiring the router installer to run again.
+
 Explicit commands remain available for diagnostics:
 
 ```text

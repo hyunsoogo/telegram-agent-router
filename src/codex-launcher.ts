@@ -1,5 +1,27 @@
 import type { RouterConfig, StatePaths } from './paths.js'
 
+type Fetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
+type SpawnedCommand = {
+  exited: Promise<number>
+  unref(): void
+}
+type CodexLaunchSpawnOptions = {
+  cwd?: string
+  stdin: 'ignore' | 'inherit'
+  stdout: 'ignore' | 'inherit'
+  stderr: 'ignore' | 'inherit'
+}
+type CodexLaunchDependencies = {
+  healthy?(config: RouterConfig): Promise<boolean>
+  sleep?(milliseconds: number): Promise<void>
+  clientUrl?(config: RouterConfig, binaryPath: string): Promise<string>
+  spawn?(argv: string[], options: CodexLaunchSpawnOptions): SpawnedCommand
+  cwd?: string
+  routerBinary?: string
+  interactive?: boolean
+}
+export const CODEX_CLIENT_REGISTRATION_TIMEOUT_MS = 60_000
+
 function healthUrl(config: RouterConfig): string {
   const url = new URL(`http://${config.host}:${config.port}/health`)
   url.searchParams.set('secret', config.secret)
@@ -63,13 +85,29 @@ export function validateCodexClientUrl(value: unknown): string {
   return value
 }
 
-async function codexClientUrl(config: RouterConfig): Promise<string> {
+export async function codexClientUrl(
+  config: RouterConfig,
+  binaryPath: string,
+  fetcher: Fetcher = fetch,
+): Promise<string> {
   const url = new URL(`http://${config.host}:${config.port}/codex-client/register`)
-  const response = await fetch(url, {
+  const response = await fetcher(url, {
     method: 'POST',
-    headers: { authorization: `Bearer ${config.secret}` },
-    signal: AbortSignal.timeout(2_000),
+    headers: {
+      authorization: `Bearer ${config.secret}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ binaryPath }),
+    signal: AbortSignal.timeout(CODEX_CLIENT_REGISTRATION_TIMEOUT_MS),
   })
+  if (response.status === 409) {
+    const result = await response.json().catch(() => ({})) as { sessions?: unknown }
+    const sessions = typeof result.sessions === 'number' ? result.sessions : undefined
+    throw new Error(
+      `Codex was updated while ${sessions ?? 'one or more'} routed session${sessions === 1 ? ' is' : 's are'} still active; ` +
+      'close the older sessions and start Codex again to refresh Telegram routing',
+    )
+  }
   if (!response.ok) throw new Error(`Codex client registration failed with HTTP ${response.status}`)
   const result = await response.json() as { url?: unknown }
   return validateCodexClientUrl(result.url)
@@ -80,24 +118,32 @@ export async function launchCodex(
   paths: StatePaths,
   config: RouterConfig,
   args: string[],
+  dependencies: CodexLaunchDependencies = {},
 ): Promise<number> {
   if (!config.appServerPort) throw new Error('codex appServerPort is not configured')
-  let argv = codexLaunchArgv(binaryPath, 'ws://127.0.0.1/unused', process.cwd(), args)
+  const checkHealth = dependencies.healthy ?? healthy
+  const sleep = dependencies.sleep ?? Bun.sleep
+  const getClientUrl = dependencies.clientUrl ?? codexClientUrl
+  const spawn = dependencies.spawn ?? ((argv, options) => Bun.spawn(argv, options))
+  const cwd = dependencies.cwd ?? process.cwd()
+  const interactive = dependencies.interactive
+    ?? Boolean(process.stdin.isTTY && process.stdout.isTTY)
+  let argv = codexLaunchArgv(binaryPath, 'ws://127.0.0.1/unused', cwd, args, interactive)
   let routed = argv[1] === '--remote'
-  if (routed && !await healthy(config)) {
-    const routerBinary = process.execPath
-    const daemon = Bun.spawn([routerBinary, 'daemon', '--profile', 'codex'], {
+  if (routed && !await checkHealth(config)) {
+    const routerBinary = dependencies.routerBinary ?? process.execPath
+    const daemon = spawn([routerBinary, 'daemon', '--profile', 'codex'], {
       stdin: 'ignore',
       stdout: 'ignore',
       stderr: 'ignore',
     })
     daemon.unref()
-    for (let attempt = 0; attempt < 40 && !await healthy(config); attempt += 1) await Bun.sleep(250)
+    for (let attempt = 0; attempt < 40 && !await checkHealth(config); attempt += 1) await sleep(250)
   }
   // The router only adds Telegram routing; it must never make Codex itself
   // unavailable. If the daemon cannot serve this launch, degrade to a plain
   // local Codex session instead of failing the command.
-  if (routed && !await healthy(config)) {
+  if (routed && !await checkHealth(config)) {
     process.stderr.write(
       `telegram-agent-router: codex router is not healthy; starting Codex without Telegram routing.\n` +
       `telegram-agent-router: run doctor --profile codex to repair it (${paths.config})\n`,
@@ -107,7 +153,7 @@ export async function launchCodex(
   }
   if (routed) {
     try {
-      argv = codexLaunchArgv(binaryPath, await codexClientUrl(config), process.cwd(), args)
+      argv = codexLaunchArgv(binaryPath, await getClientUrl(config, binaryPath), cwd, args, interactive)
     } catch (error) {
       process.stderr.write(
         `telegram-agent-router: codex client registration failed: ${String(error)}\n` +
@@ -117,8 +163,8 @@ export async function launchCodex(
     }
   }
 
-  const child = Bun.spawn(argv, {
-    cwd: process.cwd(),
+  const child = spawn(argv, {
+    cwd,
     stdin: 'inherit',
     stdout: 'inherit',
     stderr: 'inherit',

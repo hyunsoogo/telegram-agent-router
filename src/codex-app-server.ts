@@ -1,4 +1,10 @@
 import { basename } from 'node:path'
+import {
+  clientBinaryIdentity,
+  resolveCodexRuntimeBinary,
+  sameClientBinary,
+  type ClientBinaryIdentity,
+} from './client-binary.js'
 import type { RouterConfig } from './paths.js'
 import type { InboundEvent, SessionDescriptor } from './protocol.js'
 import { VERSION } from './version.js'
@@ -33,10 +39,23 @@ export const CODEX_APP_SERVER_STDIO = {
 } as const
 
 type CodexAppServerProcess = ReturnType<typeof Bun.spawn>
-type CodexAppServerSpawner = (
+export type CodexAppServerSpawner = (
   argv: string[],
   options: typeof CODEX_APP_SERVER_STDIO,
 ) => CodexAppServerProcess
+
+export type CodexBinaryPreparation =
+  | { status: 'ready'; changed: boolean }
+  | { status: 'busy'; sessions: number }
+
+export function codexBinaryPreparationDecision(
+  current: ClientBinaryIdentity | undefined,
+  requested: ClientBinaryIdentity,
+  busy: boolean,
+): 'ready' | 'replace' | 'busy' {
+  if (sameClientBinary(current, requested)) return 'ready'
+  return busy ? 'busy' : 'replace'
+}
 
 export function spawnCodexAppServer(
   binary: string,
@@ -158,12 +177,20 @@ export class CodexAppServer {
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private recovering = false
   private startupStderrTail: Promise<string> = Promise.resolve('')
+  private currentBinary: ClientBinaryIdentity | undefined
+  private spawnedBinary: ClientBinaryIdentity | undefined
+  private binaryReplacement: Promise<void> | null = null
+  private replacingBinary = false
+  private ownsAppServer = false
+  private readonly expectedProcessExits = new WeakSet<object>()
 
   constructor(
     private readonly config: RouterConfig,
     private readonly onOutput: (output: CodexOutput) => Promise<void>,
     private readonly onDiagnostic: (event: string, details?: Record<string, unknown>) => void = () => {},
     private readonly onPortChange: (port: number) => void = () => {},
+    private readonly onBinaryChange: (binary: string, port: number) => void = () => {},
+    private readonly spawn: CodexAppServerSpawner = Bun.spawn,
   ) {}
 
   async start(): Promise<void> {
@@ -171,24 +198,76 @@ export class CodexAppServer {
     if (!this.config.appServerPort) throw new Error('Codex App Server port is missing from the codex profile')
     await this.connectOrSpawn()
     await this.initialize()
+    this.commitSpawnedBinary()
     await this.refreshThreads()
-    this.pollTimer = setInterval(() => void this.refreshThreads().catch(error => {
+    this.pollTimer = setInterval(() => {
+      if (this.binaryReplacement || this.replacingBinary) return
+      void this.refreshThreads().catch(error => {
       process.stderr.write(`telegram-agent-router[codex]: thread refresh failed: ${String(error)}\n`)
-    }), 2_000)
+      })
+    }, 2_000)
   }
 
   async stop(): Promise<void> {
     this.stopped = true
     if (this.pollTimer) clearInterval(this.pollTimer)
     this.pollTimer = null
-    this.socket?.close()
-    this.socket = null
-    this.rejectPending(new Error('Codex App Server adapter stopped'))
-    if (this.process) {
-      this.process.kill()
-      await this.process.exited.catch(() => {})
-      this.process = null
+    await this.binaryReplacement?.catch(() => {})
+    await this.stopRuntime(new Error('Codex App Server adapter stopped'))
+  }
+
+  binaryIdentity(): ClientBinaryIdentity | undefined {
+    return this.currentBinary ? { ...this.currentBinary } : undefined
+  }
+
+  async prepareBinary(binaryPath: string, connectedProxies = 0): Promise<CodexBinaryPreparation> {
+    const requested = clientBinaryIdentity(binaryPath, 'codex')
+    if (this.binaryReplacement || this.replacingBinary || this.recovering) {
+      return {
+        status: 'busy',
+        sessions: Math.max(connectedProxies, this.threadClients.size, 1),
+      }
     }
+    if (!this.ownsAppServer && this.socket?.readyState === WebSocket.OPEN) {
+      const previousConfiguredBinary = this.config.codexBinary
+      this.config.codexBinary = requested.path
+      try {
+        this.onBinaryChange(requested.path, this.config.appServerPort!)
+      } catch (error) {
+        this.config.codexBinary = previousConfiguredBinary
+        this.diagnose('codex_binary_persist_failed', {
+          binary: requested.path,
+          app_server_port: this.config.appServerPort,
+          error: String(error),
+        })
+        throw error
+      }
+      this.diagnose('codex_binary_replacement_deferred_unowned', {
+        binary: requested.path,
+        app_server_port: this.config.appServerPort,
+      })
+      return { status: 'ready', changed: false }
+    }
+    const busy = connectedProxies > 0
+      || this.threadClients.size > 0
+      || this.activeTurns.size > 0
+      || this.deliveryQueues.size > 0
+    const decision = codexBinaryPreparationDecision(this.currentBinary, requested, busy)
+    if (decision === 'ready') return { status: 'ready', changed: false }
+    if (decision === 'busy') {
+      return {
+        status: 'busy',
+        sessions: Math.max(connectedProxies, this.threadClients.size, 1),
+      }
+    }
+    const replacement = this.replaceBinary(requested)
+    this.binaryReplacement = replacement
+    try {
+      await replacement
+    } finally {
+      if (this.binaryReplacement === replacement) this.binaryReplacement = null
+    }
+    return { status: 'ready', changed: true }
   }
 
   list(): SessionDescriptor[] {
@@ -294,6 +373,12 @@ export class CodexAppServer {
   private async connectOrSpawn(): Promise<void> {
     try {
       await this.connect(this.url(), 750)
+      this.ownsAppServer = this.process?.exitCode === null
+      if (!this.ownsAppServer) {
+        this.diagnose('app_server_attached_unowned', {
+          app_server_port: this.config.appServerPort,
+        })
+      }
       return
     } catch {}
 
@@ -318,41 +403,61 @@ export class CodexAppServer {
     }
   }
 
-  private async spawnAndConnect(): Promise<void> {
+  private async spawnAndConnect(binaryOverride?: string): Promise<void> {
     const url = this.url()
     if (!this.process || this.process.exitCode !== null) {
-      const binary = this.config.codexBinary ?? Bun.which('codex')
+      const binary = binaryOverride ?? resolveCodexRuntimeBinary(this.config.codexBinary)
       if (!binary) throw new Error('Codex CLI not found; configure the codex profile with --codex-binary')
-      const child = spawnCodexAppServer(binary, url)
-      const startedAt = Date.now()
-      const stderrTail = readStderrTail(child.stderr).catch(() => '')
+      const identity = clientBinaryIdentity(binary, 'codex')
+      const { child, stderrTail } = this.startProcess(identity, url)
       this.process = child
+      this.spawnedBinary = identity
       this.startupStderrTail = stderrTail
-      this.diagnose('app_server_spawned', {
-        app_server_pid: child.pid,
-        app_server_port: this.config.appServerPort,
-        binary,
-      })
-      void child.exited.then(async code => {
-        this.diagnose('app_server_exited', {
-          app_server_pid: child.pid,
-          exit_code: code,
-          signal_code: child.signalCode,
-          killed: child.killed,
-          expected: this.stopped,
-          uptime_ms: Date.now() - startedAt,
-          tracked_sessions: this.threadClients.size,
-          stderr_tail: await stderrTail,
-        })
-        if (!this.stopped) process.stderr.write(`telegram-agent-router[codex]: App Server exited with code ${code}\n`)
-      })
     }
 
+    await this.waitForProcessConnection(this.process, this.startupStderrTail, url)
+    this.ownsAppServer = true
+  }
+
+  private startProcess(
+    identity: ClientBinaryIdentity,
+    url: string,
+  ): { child: CodexAppServerProcess; stderrTail: Promise<string> } {
+    const child = spawnCodexAppServer(identity.path, url, this.spawn)
+    const startedAt = Date.now()
+    const stderrTail = readStderrTail(child.stderr).catch(() => '')
+    this.diagnose('app_server_spawned', {
+      app_server_pid: child.pid,
+      app_server_port: new URL(url).port,
+      binary: identity.path,
+    })
+    void child.exited.then(async code => {
+      const expected = this.stopped || this.expectedProcessExits.has(child)
+      this.diagnose('app_server_exited', {
+        app_server_pid: child.pid,
+        exit_code: code,
+        signal_code: child.signalCode,
+        killed: child.killed,
+        expected,
+        uptime_ms: Date.now() - startedAt,
+        tracked_sessions: this.threadClients.size,
+        stderr_tail: await stderrTail,
+      })
+      if (!expected) process.stderr.write(`telegram-agent-router[codex]: App Server exited with code ${code}\n`)
+    })
+    return { child, stderrTail }
+  }
+
+  private async waitForProcessConnection(
+    child: CodexAppServerProcess,
+    stderrTail: Promise<string>,
+    url: string,
+  ): Promise<void> {
     let lastError: unknown
     for (let attempt = 0; attempt < 30; attempt += 1) {
-      if (this.process.exitCode !== null) {
-        const stderrTail = await Promise.race([this.startupStderrTail, Bun.sleep(1_000).then(() => '')])
-        throw new CodexAppServerExitError(this.process.exitCode, stderrTail)
+      if (child.exitCode !== null) {
+        const tail = await Promise.race([stderrTail, Bun.sleep(1_000).then(() => '')])
+        throw new CodexAppServerExitError(child.exitCode, tail)
       }
       try {
         await this.connect(url, 750)
@@ -363,6 +468,152 @@ export class CodexAppServer {
       }
     }
     throw new Error(`could not connect to Codex App Server at ${url}: ${String(lastError)}`)
+  }
+
+  private commitSpawnedBinary(failOnPersistError = false): void {
+    const identity = this.spawnedBinary
+    if (!identity) return
+    const port = this.config.appServerPort
+    if (!port) throw new Error('Codex App Server port is missing')
+    this.currentBinary = identity
+    this.spawnedBinary = undefined
+    this.config.codexBinary = identity.path
+    try {
+      this.onBinaryChange(identity.path, port)
+    } catch (error) {
+      this.diagnose('codex_binary_persist_failed', {
+        binary: identity.path,
+        app_server_port: port,
+        error: String(error),
+      })
+      if (failOnPersistError) throw error
+      process.stderr.write(`telegram-agent-router[codex]: could not persist Codex binary ${identity.path}: ${String(error)}\n`)
+    }
+  }
+
+  private async stopRuntime(error: Error): Promise<void> {
+    const socket = this.socket
+    this.socket = null
+    socket?.close()
+    this.rejectPending(error)
+    const child = this.process
+    this.process = null
+    this.spawnedBinary = undefined
+    this.ownsAppServer = false
+    if (!child) return
+    this.expectedProcessExits.add(child)
+    child.kill()
+    await child.exited.catch(() => {})
+  }
+
+  private async replaceBinary(requested: ClientBinaryIdentity): Promise<void> {
+    const previous = this.currentBinary
+    const previousPort = this.config.appServerPort
+    const previousConfiguredBinary = this.config.codexBinary
+    if (!previousPort) throw new Error('Codex App Server port is missing')
+    const previousUrl = this.url()
+    const previousSocket = this.socket
+    const previousProcess = this.process
+    const previousOwnership = this.ownsAppServer
+    const candidatePort = findBindablePort(previousPort === 65535 ? previousPort - 19 : previousPort + 1)
+    const candidateUrl = `ws://127.0.0.1:${candidatePort}`
+    let candidateProcess: CodexAppServerProcess | null = null
+    let candidateSocket: WebSocket | null = null
+    this.replacingBinary = true
+    this.diagnose('codex_binary_replacement_started', {
+      previous_binary: previous?.path,
+      binary: requested.path,
+      previous_port: previousPort,
+      candidate_port: candidatePort,
+    })
+    try {
+      const candidate = this.startProcess(requested, candidateUrl)
+      candidateProcess = candidate.child
+      await this.waitForProcessConnection(candidate.child, candidate.stderrTail, candidateUrl)
+      const connectedCandidateSocket = this.socket
+      if (!connectedCandidateSocket) throw new Error('updated Codex App Server did not open a socket')
+      candidateSocket = connectedCandidateSocket
+      await this.initialize()
+      await Bun.sleep(100)
+      if (candidate.child.exitCode !== null) {
+        const tail = await Promise.race([candidate.stderrTail, Bun.sleep(1_000).then(() => '')])
+        throw new CodexAppServerExitError(candidate.child.exitCode, tail)
+      }
+      if (this.socket !== connectedCandidateSocket || connectedCandidateSocket.readyState !== WebSocket.OPEN) {
+        throw new Error('updated Codex App Server disconnected during validation')
+      }
+
+      this.config.appServerPort = candidatePort
+      this.process = candidate.child
+      this.startupStderrTail = candidate.stderrTail
+      this.spawnedBinary = requested
+      this.currentBinary = undefined
+      this.commitSpawnedBinary(true)
+      this.ownsAppServer = true
+      try {
+        if (previousSocket && previousSocket !== connectedCandidateSocket) previousSocket.close()
+      } catch (error) {
+        this.diagnose('previous_app_server_socket_close_failed', {
+          error: String(error),
+        })
+      }
+      if (previousProcess && previousProcess !== candidate.child) {
+        this.expectedProcessExits.add(previousProcess)
+        try {
+          previousProcess.kill()
+          void previousProcess.exited.catch(() => {})
+        } catch (error) {
+          this.diagnose('previous_app_server_stop_failed', {
+            app_server_pid: previousProcess.pid,
+            error: String(error),
+          })
+        }
+      }
+      // Once the old server is detached, candidate failures use normal recovery.
+      // Keep this transition synchronous so no close event is suppressed.
+      this.replacingBinary = false
+      this.threads.clear()
+      this.activeTurns.clear()
+      this.routedTurns.clear()
+      this.deliveryQueues.clear()
+      this.subscribedThreads.clear()
+      this.subscribingThreads.clear()
+      this.clientThreads.clear()
+      this.threadClients.clear()
+      await this.refreshThreads()
+      this.diagnose('codex_binary_replacement_completed', {
+        binary: requested.path,
+        app_server_port: candidatePort,
+      })
+    } catch (replacementError) {
+      if (candidateSocket && candidateSocket !== previousSocket) {
+        this.socket = previousSocket?.readyState === WebSocket.OPEN ? previousSocket : null
+        candidateSocket.close()
+      }
+      if (candidateProcess) {
+        this.expectedProcessExits.add(candidateProcess)
+        candidateProcess.kill()
+        await candidateProcess.exited.catch(() => {})
+      }
+      this.config.appServerPort = previousPort
+      this.config.codexBinary = previous?.path ?? previousConfiguredBinary
+      this.process = previousProcess
+      this.currentBinary = previous
+      this.spawnedBinary = undefined
+      this.ownsAppServer = previousOwnership
+      if (!this.socket && previousProcess?.exitCode === null) {
+        await this.connect(previousUrl, 2_000)
+        await this.initialize()
+      }
+      this.diagnose('codex_binary_replacement_rolled_back', {
+        binary: requested.path,
+        restored_binary: previous?.path,
+        error: String(replacementError),
+      })
+      throw new Error(`updated Codex App Server failed validation; kept the previous server running: ${String(replacementError)}`)
+    } finally {
+      this.replacingBinary = false
+    }
   }
 
   private url(): string {
@@ -390,7 +641,7 @@ export class CodexAppServer {
       if (this.socket !== socket) return
       this.socket = null
       this.rejectPending(new Error('Codex App Server disconnected'))
-      if (!this.stopped) {
+      if (!this.stopped && !this.replacingBinary) {
         this.diagnose('app_server_disconnected', {
           app_server_pid: this.process?.pid,
           app_server_exit_code: this.process?.exitCode,
@@ -620,6 +871,7 @@ export class CodexAppServer {
         try {
           await this.connectOrSpawn()
           await this.initialize()
+          this.commitSpawnedBinary()
           await this.refreshThreads()
           this.diagnose('app_server_reconnected', { attempt })
           process.stderr.write('telegram-agent-router[codex]: App Server reconnected\n')
