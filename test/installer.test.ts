@@ -149,6 +149,7 @@ describe('standalone client installer', () => {
     const binary = join(home, 'claude-real')
     const link = join(home, 'claude')
     writeFileSync(binary, 'claude binary')
+    chmodSync(binary, 0o755)
     symlinkSync(binary, link)
 
     expect(resolveClaudeBinaryPath(link, 'linux')).toBe(realpathSync(binary))
@@ -159,6 +160,7 @@ describe('standalone client installer', () => {
     const binary = join(home, 'codex-real')
     const link = join(home, 'codex')
     writeFileSync(binary, 'codex binary')
+    chmodSync(binary, 0o755)
     symlinkSync(binary, link)
 
     expect(resolveCodexBinaryPath(link, 'linux')).toBe(realpathSync(binary))
