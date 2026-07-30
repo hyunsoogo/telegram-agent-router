@@ -3,7 +3,7 @@ import type { ReactionTypeEmoji } from 'grammy/types'
 import type { ServerWebSocket } from 'bun'
 import { randomUUID } from 'node:crypto'
 import { CodexAppServer } from './codex-app-server.js'
-import { CodexClientObserver } from './codex-client-observer.js'
+import { CodexClientObserver, persistentCodexClientMessage } from './codex-client-observer.js'
 import { loadBotToken, loadConfig, statePaths, type RouterProfile } from './paths.js'
 import { parseBridgeMessage, type InboundEvent, type RouterAction, type RouterToBridge, type SessionDescriptor } from './protocol.js'
 import { SessionRegistry } from './session-registry.js'
@@ -232,9 +232,10 @@ async function runOwnedDaemon(
         },
         message(ws, raw) {
           const message = typeof raw === 'string' ? raw : new TextDecoder().decode(raw)
-          ws.data.observer.observeClientMessage(message)
+          const forwarded = persistentCodexClientMessage(message)
+          ws.data.observer.observeClientMessage(forwarded)
           try {
-            ws.data.upstream.send(message)
+            ws.data.upstream.send(forwarded)
           } catch {
             ws.close()
           }

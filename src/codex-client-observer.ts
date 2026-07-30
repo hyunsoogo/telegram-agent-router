@@ -1,5 +1,12 @@
 type JsonRpcId = number | string
 
+type ClientMessage = {
+  id?: JsonRpcId
+  method?: string
+  params?: unknown
+  [key: string]: unknown
+}
+
 export type CodexThreadStatus = {
   type: 'notLoaded' | 'idle' | 'systemError' | 'active'
   activeFlags?: string[]
@@ -19,6 +26,34 @@ export type CodexThread = {
     status: 'completed' | 'interrupted' | 'failed' | 'inProgress'
     error?: { message?: string } | null
   }>
+}
+
+// Interactive Codex clients create blank threads as ephemeral. A second App
+// Server connection cannot resume those threads until their first local turn,
+// so make them persistent at creation while preserving the client's thread ID.
+export function persistentCodexClientMessage(raw: string): string {
+  let message: ClientMessage
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return raw
+    message = parsed as ClientMessage
+  } catch {
+    return raw
+  }
+  if (message.method !== 'thread/start') return raw
+  if (
+    message.params !== undefined
+    && (message.params === null || typeof message.params !== 'object' || Array.isArray(message.params))
+  ) {
+    return raw
+  }
+  return JSON.stringify({
+    ...message,
+    params: {
+      ...(message.params as Record<string, unknown> | undefined),
+      ephemeral: false,
+    },
+  })
 }
 
 function rootThread(value: unknown): CodexThread | undefined {
