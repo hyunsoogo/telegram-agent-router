@@ -145,10 +145,14 @@ registration, and automatic-start entries are replaced.
 
 Updating the Codex CLI itself does not require reinstalling the router. Codex
 administrative commands such as `codex update` bypass remote routing. On the
-next interactive launch, the wrapper reports the resolved real binary and its
-file identity to the daemon. An in-place update is detected from file metadata;
-if the recorded path disappeared, the wrapper searches `PATH` while skipping
-its own managed shim.
+next interactive launch, the wrapper reports the configured binary path and its
+file identity to the daemon. For standalone Codex installs, discovery prefers
+the update-safe `standalone/current/bin/codex` path (or `codex.exe` on Windows)
+and preserves that path instead of resolving the `current` junction to a
+versioned `releases/<version>` target. Existing versioned standalone paths are
+automatically migrated to `current` when it is available. If the recorded path
+disappeared, the wrapper searches the standalone location and then `PATH` while
+skipping its own managed shim.
 
 When no routed Codex clients or deliveries are active, the daemon starts the
 new App Server on a separate loopback port and initializes it before switching.
@@ -266,6 +270,11 @@ telegram-agent-router doctor --profile all
 telegram-agent-router doctor --profile claude
 telegram-agent-router doctor --profile codex
 ```
+
+For the Codex profile, `doctor` also compares the installed Codex file identity
+with the binary identity reported by the running router. A failed check means
+the router is still supervising a different Codex build; close older routed
+sessions and launch Codex through the wrapper again, or restart the profile.
 
 Crash and lifecycle events are written as JSON Lines:
 

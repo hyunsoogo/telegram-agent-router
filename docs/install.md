@@ -74,9 +74,12 @@ The managed wrapper lets Codex administrative commands, including
 interactive launch:
 
 1. resolves the recorded real Codex executable, falling back to an unmanaged
-   `codex` on `PATH` if that path no longer exists;
-2. reports its canonical path so the daemon can compare path, size, and
-   modification time;
+   `codex` on `PATH` if that path no longer exists. Standalone installs prefer
+   `standalone/current/bin/codex` (`codex.exe` on Windows), and versioned
+   `releases/<version>` settings migrate to that stable path automatically;
+2. reports the stable configured path plus size and modification time. The
+   router validates the junction target without replacing `current` with its
+   versioned real path;
 3. keeps the current App Server while any routed client or delivery is active;
 4. otherwise initializes a candidate App Server on a separate loopback port
    before switching and persisting the new binary and port.
@@ -118,6 +121,8 @@ available during manual allowlisting:
 ```
 
 The command checks profile configuration, token presence, SQLite, installed
-Claude/Codex CLIs, and the authenticated loopback health endpoints. The Codex
-App Server child does not inherit daemon stdout or stderr, so conversation and
-tool output is not mirrored into an automatic-start console.
+Claude/Codex CLIs, and the authenticated loopback health endpoints. For Codex,
+it also detects when the installed binary identity differs from the build used
+by the running App Server. The Codex App Server child does not inherit daemon
+stdout or stderr, so conversation and tool output is not mirrored into an
+automatic-start console.

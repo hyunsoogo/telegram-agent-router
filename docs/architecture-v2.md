@@ -152,14 +152,18 @@ Installation also places a thin `codex` wrapper before the real executable on
 the user's path. It preserves arguments and working directory, ensures the
 Codex profile daemon is healthy, requests a short-lived single-use loopback
 port, and invokes the real binary with the router proxy's host-and-port-only
-`--remote` URL. The resolved real Codex path is stored at install time to
-prevent wrapper recursion.
+`--remote` URL. The validated Codex path is stored at install time to prevent
+wrapper recursion. Standalone installs retain the update-safe
+`standalone/current/bin/codex` path instead of canonicalizing its junction to a
+versioned `releases/<version>` target.
 
 Every interactive Codex registration also includes the real binary path. The
-daemon compares its canonical path, size, and modification time with the
-identity of the supervised App Server. Identical clients attach normally. A
-changed binary is deferred while any CLI proxy, tracked thread, active turn, or
-delivery queue exists.
+daemon compares its stable path, size, and modification time with the identity
+of the supervised App Server. The path target is still validated before launch.
+Identical clients attach normally. A changed binary is deferred while any CLI
+proxy, tracked thread, active turn, or delivery queue exists. Loading an older
+`releases/<version>` configuration migrates it to `current` when that junction
+is available.
 
 When idle, replacement is blue-green: the daemon starts and initializes the
 candidate App Server on a free loopback port while the previous process and

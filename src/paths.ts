@@ -1,7 +1,19 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { randomBytes } from 'node:crypto'
+import { resolveClientBinaryPath } from './client-binary.js'
 
 export type RouterConfig = {
   profile: RouterProfile
@@ -60,6 +72,17 @@ export function loadConfig(paths = statePaths()): RouterConfig {
   if (!parsed.secret || !parsed.host || !Number.isInteger(parsed.port)) {
     throw new Error(`invalid router config: ${paths.config}`)
   }
+  let codexBinary = parsed.codexBinary
+  if (paths.profile === 'codex' && codexBinary) {
+    let migrated: string | undefined
+    try {
+      migrated = resolveClientBinaryPath(codexBinary, 'codex')
+    } catch {}
+    if (migrated && migrated !== codexBinary) {
+      persistConfigPatch({ codexBinary: migrated }, paths)
+      codexBinary = migrated
+    }
+  }
   return {
     profile: parsed.profile ?? paths.profile,
     host: parsed.host,
@@ -67,7 +90,51 @@ export function loadConfig(paths = statePaths()): RouterConfig {
     secret: parsed.secret,
     ...(Number.isInteger(parsed.appServerPort) ? { appServerPort: parsed.appServerPort } : {}),
     ...(parsed.claudeBinary ? { claudeBinary: parsed.claudeBinary } : {}),
-    ...(parsed.codexBinary ? { codexBinary: parsed.codexBinary } : {}),
+    ...(codexBinary ? { codexBinary } : {}),
+  }
+}
+
+const CONFIG_LOCK_TIMEOUT_MS = 2_000
+const CONFIG_LOCK_STALE_MS = 30_000
+const CONFIG_LOCK_WAIT_MS = 10
+const configLockWaiter = new Int32Array(new SharedArrayBuffer(4))
+
+function withConfigLock<T>(paths: StatePaths, update: () => T): T {
+  const lockPath = `${paths.config}.lock`
+  const token = randomBytes(16).toString('hex')
+  const deadline = Date.now() + CONFIG_LOCK_TIMEOUT_MS
+  let descriptor: number | undefined
+  while (descriptor === undefined) {
+    try {
+      descriptor = openSync(lockPath, 'wx', 0o600)
+      writeFileSync(descriptor, token)
+    } catch (error) {
+      if (descriptor !== undefined) {
+        try { closeSync(descriptor) } catch {}
+        descriptor = undefined
+        try { unlinkSync(lockPath) } catch {}
+      }
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > CONFIG_LOCK_STALE_MS) {
+          unlinkSync(lockPath)
+          continue
+        }
+      } catch (probe) {
+        if ((probe as NodeJS.ErrnoException).code !== 'ENOENT') throw probe
+        continue
+      }
+      if (Date.now() >= deadline) throw new Error(`timed out waiting to update router config: ${paths.config}`)
+      Atomics.wait(configLockWaiter, 0, 0, CONFIG_LOCK_WAIT_MS)
+    }
+  }
+  try {
+    return update()
+  } finally {
+    try { closeSync(descriptor) } catch {}
+    try {
+      if (readFileSync(lockPath, 'utf8') === token) unlinkSync(lockPath)
+    } catch {}
   }
 }
 
@@ -75,17 +142,19 @@ export function persistConfigPatch(
   patch: Partial<RouterConfig>,
   paths = statePaths(),
 ): void {
-  const existing = JSON.parse(readFileSync(paths.config, 'utf8')) as Partial<RouterConfig>
-  const temporary = `${paths.config}.new-${process.pid}-${Date.now()}`
-  writeFileSync(temporary, `${JSON.stringify({ ...existing, ...patch }, null, 2)}\n`, { mode: 0o600 })
-  try { chmodSync(temporary, 0o600) } catch {}
-  try {
-    renameSync(temporary, paths.config)
-  } catch (error) {
-    try { unlinkSync(temporary) } catch {}
-    throw error
-  }
-  try { chmodSync(paths.config, 0o600) } catch {}
+  withConfigLock(paths, () => {
+    const existing = JSON.parse(readFileSync(paths.config, 'utf8')) as Partial<RouterConfig>
+    const temporary = `${paths.config}.new-${process.pid}-${Date.now()}`
+    writeFileSync(temporary, `${JSON.stringify({ ...existing, ...patch }, null, 2)}\n`, { mode: 0o600 })
+    try { chmodSync(temporary, 0o600) } catch {}
+    try {
+      renameSync(temporary, paths.config)
+    } catch (error) {
+      try { unlinkSync(temporary) } catch {}
+      throw error
+    }
+    try { chmodSync(paths.config, 0o600) } catch {}
+  })
 }
 
 export function persistAppServerPort(port: number, paths = statePaths('codex')): void {

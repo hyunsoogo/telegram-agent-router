@@ -4,7 +4,12 @@ import { resolve } from 'node:path'
 import { runMcpBridge, type BridgeOptions } from './bridge.js'
 import { launchClaude } from './claude-launcher.js'
 import { launchCodex } from './codex-launcher.js'
-import { resolveCodexRuntimeBinary } from './client-binary.js'
+import {
+  clientBinaryIdentity,
+  codexVersionCheck,
+  resolveCodexRuntimeBinary,
+  type ClientBinaryIdentity,
+} from './client-binary.js'
 import {
   asProfile,
   configureState,
@@ -131,6 +136,13 @@ async function doctorProfile(profile: RouterProfile): Promise<Array<[string, boo
   } catch (error) {
     checks.push([`${profile} sqlite`, false, String(error)])
   }
+  let installedCodex: ClientBinaryIdentity | undefined
+  if (profile === 'codex') {
+    const binary = resolveCodexRuntimeBinary(config?.codexBinary)
+    if (binary) {
+      try { installedCodex = clientBinaryIdentity(binary, 'codex') } catch {}
+    }
+  }
   if (config) {
     try {
       const health = new URL(`http://${config.host}:${config.port}/health`)
@@ -139,7 +151,11 @@ async function doctorProfile(profile: RouterProfile): Promise<Array<[string, boo
       if (!response.ok) {
         checks.push([`${profile} daemon`, false, `HTTP ${response.status}`])
       } else {
-        const payload = await response.json() as { profile?: string; version?: string }
+        const payload = await response.json() as {
+          profile?: string
+          version?: string
+          codex_binary?: ClientBinaryIdentity
+        }
         const healthy = payload.profile === profile && payload.version === VERSION
         checks.push([
           `${profile} daemon`,
@@ -148,13 +164,17 @@ async function doctorProfile(profile: RouterProfile): Promise<Array<[string, boo
             ? `${config.host}:${config.port} v${payload.version}`
             : `${payload.profile ?? 'unknown'} ${payload.version ?? 'legacy'} on ${config.host}:${config.port}`,
         ])
+        if (profile === 'codex') {
+          const [matches, detail] = codexVersionCheck(installedCodex, payload.codex_binary)
+          checks.push(['Codex installed/router runtime version', matches, detail])
+        }
       }
     } catch (error) {
       checks.push([`${profile} daemon`, false, String(error)])
     }
   }
   if (profile === 'claude') checks.push(['Claude Code CLI', Boolean(config?.claudeBinary ?? Bun.which('claude')), config?.claudeBinary ?? Bun.which('claude') ?? 'not found'])
-  if (profile === 'codex') checks.push(['Codex CLI', Boolean(config?.codexBinary ?? Bun.which('codex')), config?.codexBinary ?? Bun.which('codex') ?? 'not found'])
+  if (profile === 'codex') checks.push(['Codex CLI', Boolean(installedCodex), installedCodex?.path ?? 'not found'])
   if (process.platform === 'win32') {
     const resolution = resolveWindowsCommand(profile)
     checks.push([

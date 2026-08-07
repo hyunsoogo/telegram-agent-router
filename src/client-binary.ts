@@ -1,4 +1,5 @@
 import { lstatSync, readFileSync, realpathSync, statSync, type Stats } from 'node:fs'
+import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 export type ClientKind = 'claude' | 'codex'
@@ -15,6 +16,17 @@ export const CLIENT_WRAPPER_MARKERS: Record<ClientKind, string> = {
 }
 
 const MAX_WRAPPER_BYTES = 16 * 1024
+
+function codexCurrentBinaryForReleasePath(path: string): string | undefined {
+  const match = path.match(/^(.*[\\/]standalone)[\\/]releases[\\/][^\\/]+[\\/]bin[\\/](codex(?:\.exe)?)$/i)
+  if (!match) return undefined
+  const separator = path.includes('\\') ? '\\' : '/'
+  return `${match[1]}${separator}current${separator}bin${separator}${match[2]}`
+}
+
+function isCodexStandaloneCurrentPath(path: string): boolean {
+  return /[\\/]standalone[\\/]current[\\/]bin[\\/]codex(?:\.exe)?$/i.test(path)
+}
 
 function lstatIfPresent(path: string): Stats | undefined {
   try {
@@ -47,12 +59,14 @@ export function resolveClientBinaryPath(
 ): string | undefined {
   if (!candidate) return undefined
   const absolute = resolve(candidate)
+  const current = client === 'codex' ? codexCurrentBinaryForReleasePath(absolute) : undefined
+  const selected = current && lstatIfPresent(current) ? current : absolute
   let canonical: string
   try {
-    canonical = realpathSync(absolute)
+    canonical = realpathSync(selected)
   } catch {
     const label = client === 'claude' ? 'Claude' : 'Codex'
-    throw new Error(`${label} binary does not resolve to an existing file: ${absolute}`)
+    throw new Error(`${label} binary does not resolve to an existing file: ${selected}`)
   }
   const target = statSync(canonical)
   if (
@@ -66,7 +80,31 @@ export function resolveClientBinaryPath(
     const label = client === 'claude' ? 'Claude' : 'Codex'
     throw new Error(`${label} binary resolves to the managed router wrapper: ${canonical}; pass --${client}-binary with the real executable`)
   }
-  return canonical
+  // Codex standalone updates atomically retarget the `current` junction. Keep
+  // that stable path as the executable identity while validating its target.
+  return client === 'codex' && isCodexStandaloneCurrentPath(selected) ? selected : canonical
+}
+
+export function codexStandaloneCurrentCandidates(
+  platform: NodeJS.Platform = process.platform,
+  environment: Record<string, string | undefined> = process.env,
+  homeDirectory = homedir(),
+): string[] {
+  const executable = platform === 'win32' ? 'codex.exe' : 'codex'
+  const roots = [
+    environment.CODEX_HOME,
+    ...(platform === 'win32' && environment.LOCALAPPDATA
+      ? [
+          join(environment.LOCALAPPDATA, 'OpenAI', 'Codex'),
+          join(environment.LOCALAPPDATA, 'Codex'),
+        ]
+      : []),
+    join(homeDirectory, '.codex'),
+  ].filter((root): root is string => Boolean(root))
+  return [...new Set(roots.flatMap(root => [
+    resolve(root, 'packages', 'standalone', 'current', 'bin', executable),
+    resolve(root, 'standalone', 'current', 'bin', executable),
+  ]))]
 }
 
 export function findUnmanagedClientBinary(
@@ -102,10 +140,16 @@ export function resolveCodexRuntimeBinary(
   environmentPath = process.env.PATH ?? '',
   pathExtensions = process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD',
   platform: NodeJS.Platform = process.platform,
+  standaloneCandidates = codexStandaloneCurrentCandidates(platform),
 ): string | undefined {
   if (configuredPath) {
     try {
       return resolveClientBinaryPath(configuredPath, 'codex', platform)
+    } catch {}
+  }
+  for (const candidate of standaloneCandidates) {
+    try {
+      return resolveClientBinaryPath(candidate, 'codex', platform)
     } catch {}
   }
   return findUnmanagedClientBinary('codex', environmentPath, pathExtensions, platform)
@@ -133,4 +177,19 @@ export function sameClientBinary(
     && left.size === right.size
     && left.mtimeMs === right.mtimeMs,
   )
+}
+
+export function codexVersionCheck(
+  installed: ClientBinaryIdentity | undefined,
+  running: ClientBinaryIdentity | undefined,
+): [boolean, string] {
+  if (!installed) return [false, 'installed Codex binary not found']
+  if (!running) return [false, `router did not report its Codex runtime; installed ${installed.path}`]
+  const matches = sameClientBinary(installed, running)
+  return [
+    matches,
+    matches
+      ? `${installed.path} (${installed.size} bytes)`
+      : `installed ${installed.path} (${installed.size} bytes) differs from router runtime ${running.path} (${running.size} bytes); restart or launch Codex through the router`,
+  ]
 }
