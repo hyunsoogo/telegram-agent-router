@@ -253,7 +253,7 @@ describe('stale daemon sweep', () => {
       executablePath: developmentBinary,
       commandLine: `${developmentBinary} daemon --profile codex`,
     }
-    const self = routerProcess(31337, '0.3.1', 'daemon --profile codex')
+    const self = routerProcess(31337, '0.3.2', 'daemon --profile codex')
 
     expect(staleDaemonPids([developmentDaemon, self], installDirectory, ['claude', 'codex'], 31337))
       .toEqual([])
