@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -41,6 +41,7 @@ describe('codex App Server port persistence', () => {
     const current = join(standalone, 'current')
     mkdirSync(join(release, 'bin'), { recursive: true })
     writeFileSync(join(release, 'bin', 'codex.exe'), 'Codex executable')
+    chmodSync(join(release, 'bin', 'codex.exe'), 0o755)
     symlinkSync(release, current, process.platform === 'win32' ? 'junction' : 'dir')
     writeFileSync(paths.config, JSON.stringify({
       profile: 'codex',

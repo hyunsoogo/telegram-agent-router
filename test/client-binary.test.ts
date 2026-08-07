@@ -10,7 +10,7 @@ import {
 } from '../src/client-binary.js'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, win32 as windowsPath } from 'node:path'
 
 const temporaryDirectories: string[] = []
 const executableSymlinkTest = process.platform === 'win32' ? test.skip : test
@@ -118,12 +118,12 @@ describe('client binary discovery', () => {
       LOCALAPPDATA: 'C:\\Users\\tester\\AppData\\Local',
       CODEX_HOME: 'C:\\Users\\tester\\.codex',
     }, 'C:\\Users\\tester')).toEqual([
-      resolve('C:\\Users\\tester\\.codex\\packages\\standalone\\current\\bin\\codex.exe'),
-      resolve('C:\\Users\\tester\\.codex\\standalone\\current\\bin\\codex.exe'),
-      resolve('C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\packages\\standalone\\current\\bin\\codex.exe'),
-      resolve('C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\standalone\\current\\bin\\codex.exe'),
-      resolve('C:\\Users\\tester\\AppData\\Local\\Codex\\packages\\standalone\\current\\bin\\codex.exe'),
-      resolve('C:\\Users\\tester\\AppData\\Local\\Codex\\standalone\\current\\bin\\codex.exe'),
+      windowsPath.resolve('C:\\Users\\tester\\.codex\\packages\\standalone\\current\\bin\\codex.exe'),
+      windowsPath.resolve('C:\\Users\\tester\\.codex\\standalone\\current\\bin\\codex.exe'),
+      windowsPath.resolve('C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\packages\\standalone\\current\\bin\\codex.exe'),
+      windowsPath.resolve('C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\standalone\\current\\bin\\codex.exe'),
+      windowsPath.resolve('C:\\Users\\tester\\AppData\\Local\\Codex\\packages\\standalone\\current\\bin\\codex.exe'),
+      windowsPath.resolve('C:\\Users\\tester\\AppData\\Local\\Codex\\standalone\\current\\bin\\codex.exe'),
     ])
   })
 

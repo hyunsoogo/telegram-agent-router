@@ -1,6 +1,6 @@
 import { lstatSync, readFileSync, realpathSync, statSync, type Stats } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, posix as posixPath, resolve, win32 as windowsPath } from 'node:path'
 
 export type ClientKind = 'claude' | 'codex'
 
@@ -90,20 +90,21 @@ export function codexStandaloneCurrentCandidates(
   environment: Record<string, string | undefined> = process.env,
   homeDirectory = homedir(),
 ): string[] {
+  const path = platform === 'win32' ? windowsPath : posixPath
   const executable = platform === 'win32' ? 'codex.exe' : 'codex'
   const roots = [
     environment.CODEX_HOME,
     ...(platform === 'win32' && environment.LOCALAPPDATA
       ? [
-          join(environment.LOCALAPPDATA, 'OpenAI', 'Codex'),
-          join(environment.LOCALAPPDATA, 'Codex'),
+          path.join(environment.LOCALAPPDATA, 'OpenAI', 'Codex'),
+          path.join(environment.LOCALAPPDATA, 'Codex'),
         ]
       : []),
-    join(homeDirectory, '.codex'),
+    path.join(homeDirectory, '.codex'),
   ].filter((root): root is string => Boolean(root))
   return [...new Set(roots.flatMap(root => [
-    resolve(root, 'packages', 'standalone', 'current', 'bin', executable),
-    resolve(root, 'standalone', 'current', 'bin', executable),
+    path.resolve(root, 'packages', 'standalone', 'current', 'bin', executable),
+    path.resolve(root, 'standalone', 'current', 'bin', executable),
   ]))]
 }
 
